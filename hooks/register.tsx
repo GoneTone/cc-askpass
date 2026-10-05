@@ -141,6 +141,11 @@ function paneTitle(requester: Requester): string {
   return requester.isSudo ? 'sudo password' : `Password requested by ${requester.comm} (pid ${requester.pid})`
 }
 
+/** The terminal outside fullscreen reports no clicks, so hints there name keys only. */
+function isMainScreen(e: { viewport?: { isFullscreen?: boolean } }): boolean {
+  return e.viewport?.isFullscreen === false
+}
+
 function paneHeading(requester: Requester): string {
   return requester.isSudo ? 'sudo needs your password' : `${requester.comm} (pid ${requester.pid}) needs a password`
 }
@@ -362,9 +367,12 @@ export const register: Register = on => {
     const request = current
     if (!isWaitingForOpen || request === null || e.props.hasSurvey) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
+    const howToOpen = isMainScreen(e) ? 'type /askpass, or press ctrl+x tab then Enter' : 'type /askpass or click'
     return (
       <Box>
-        <Text>{request.requester.comm} is waiting for a password — type /askpass or click </Text>
+        <Text>
+          {request.requester.comm} is waiting for a password — {howToOpen}{' '}
+        </Text>
         <Button key="open-askpass" onPress={() => void openPane($)}>
           Open password prompt
         </Button>
@@ -390,7 +398,8 @@ export const register: Register = on => {
         {/* Focus is a request: with text in the composer or a dialog up, keys stay there. */}
         {!e.props.isFocused && (
           <Text color="red" bold>
-            Click this pane (or press ctrl+x tab) before typing — your keys are going to the prompt below.
+            {isMainScreen(e) ? 'Press ctrl+x tab' : 'Click this pane (or press ctrl+x tab)'} before typing — your keys
+            are going to the prompt below.
           </Text>
         )}
         <Box flexDirection="column">

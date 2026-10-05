@@ -33,9 +33,9 @@ Ask Claude to run anything that needs sudo. A **sudo password** pane opens and s
 - **Show/Hide** reveals what you typed. Input is masked for sudo, and for every other prompt except git's `Username for '...'` and ssh's `(yes/no)` host-key question.
 - **Cancel** or Esc answers nothing; sudo stops with "no password was provided".
 - A wrong password asks again with "Sorry, try again".
-- If you were typing in the prompt (or a dialog was open) when the pane appeared, the pane cannot take the keyboard. It then says in red: click it (or press ctrl+x tab) before typing, so your password does not end up in the prompt and get sent to Claude.
+- If you were typing in the prompt (or a dialog was open) when the pane appeared, the pane cannot take the keyboard. It then says in red: click it (or press ctrl+x tab; outside fullscreen mode only the keys work) before typing, so your password does not end up in the prompt and get sent to Claude.
 - Claude Code decides where the pane goes: beside the transcript in fullscreen mode at 110 columns or more, otherwise above the prompt.
-- If the terminal is narrower than 144 columns the pane may not open on its own. A line above the prompt then says `sudo is waiting for a password — type /askpass or click [Open password prompt]`. Click the button or type `/askpass`; both work while Claude is busy.
+- If the terminal is narrower than 144 columns the pane may not open on its own. A line above the prompt then says `sudo is waiting for a password — type /askpass or click [Open password prompt]`. Click the button or type `/askpass`; both work while Claude is busy. Outside fullscreen mode the terminal reports no clicks, so the line says to type `/askpass` or press ctrl+x tab, then Enter.
 
 ## Ask once instead of every time
 

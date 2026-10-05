@@ -369,8 +369,17 @@ const BAND_PROPS = {
   view: {},
 } as const
 
-function mountBand($: any, hasSurvey = false) {
-  return $.ui.mount({ plugin: 'cc-askpass', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND_PROPS, hasSurvey } })
+// The terminal's main screen (fullscreen off) reports no clicks.
+const MAIN_SCREEN = { columns: 100, rows: 40, isFullscreen: false }
+
+function mountBand($: any, hasSurvey = false, viewport?: typeof MAIN_SCREEN) {
+  return $.ui.mount({
+    plugin: 'cc-askpass',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { ...BAND_PROPS, hasSurvey },
+    ...(viewport === undefined ? {} : { viewport }),
+  })
 }
 
 test('narrow terminal shows a band button instead of the pane', async ($, on) => {
@@ -382,6 +391,31 @@ test('narrow terminal shows a band button instead of the pane', async ($, on) =>
   expect((await band.find({ key: 'open-askpass' }))?.props.label).toBe('Open password prompt')
   expect(w.rec.statuses).toEqual([])
   expect(w.rec.toasts).toEqual([])
+})
+
+test('band hint on the main screen points at keys, not clicks', async ($, on) => {
+  const w = await world($, on)
+  w.rec.setPlaced(false)
+  await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+  const text = (await (await mountBand($, false, MAIN_SCREEN)).find({ type: 'Text', text: /waiting for a password/ }))?.text ?? ''
+  expect(text).toContain('type /askpass, or press ctrl+x tab then Enter')
+  expect(text).not.toContain('click')
+})
+
+test('focus warning on the main screen points at keys, not clicks', async ($, on) => {
+  const w = await world($, on)
+  await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+  const ui = await $.ui.mount({
+    plugin: 'cc-askpass',
+    surface: 'terminal',
+    component: 'Pane',
+    props: { ...PANE_PROPS, isFocused: false },
+    requestId: 'askpass',
+    viewport: MAIN_SCREEN,
+  })
+  const text = (await ui.find({ text: /your keys are going to the prompt below/ }))?.text ?? ''
+  expect(text).toContain('Press ctrl+x tab before typing')
+  expect(text).not.toContain('Click')
 })
 
 test('band button opens the pane and goes away', async ($, on) => {
