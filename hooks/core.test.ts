@@ -21,8 +21,8 @@ test('splitLines joins a line split across chunks', () => {
 })
 
 test('parseReady reads the session dir', () => {
-  expect(parseReady('ready\t/run/user/1000/claude-code-askpass/s1')).toBe(
-    '/run/user/1000/claude-code-askpass/s1',
+  expect(parseReady('ready\t/run/user/1000/cc-askpass/s1')).toBe(
+    '/run/user/1000/cc-askpass/s1',
   )
   expect(parseReady('12\tx')).toBe(null)
 })

@@ -1,4 +1,4 @@
-# claude-code-askpass — Design
+# cc-askpass — Design
 
 Status: approved design, not yet implemented (2026-10-05).
 Supersedes `DESIGN.md` where they disagree (notably: no password cache, English code comments).
@@ -108,8 +108,8 @@ POSIX sh, no bashisms. Two modes.
 
 **`askpass --serve <session id>`** (started by the mod):
 
-1. `umask 077`. Base dir: `$XDG_RUNTIME_DIR/claude-code-askpass` if `XDG_RUNTIME_DIR` is
-   set, else `/tmp/claude-code-askpass-$(id -u)`. Create it with `mkdir` (mode 0700); if it
+1. `umask 077`. Base dir: `$XDG_RUNTIME_DIR/cc-askpass` if `XDG_RUNTIME_DIR` is
+   set, else `/tmp/cc-askpass-$(id -u)`. Create it with `mkdir` (mode 0700); if it
    already exists, require that it is a directory, not a symlink, owned by the current user
    (`[ -d ] && [ ! -L ] && [ -O ]`), else exit 1 with a message on stderr.
 2. Session dir: `<base>/<session id>`. Remove it if present, recreate (0700), `mkfifo req`.

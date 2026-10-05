@@ -61,7 +61,7 @@ start_helper() {
 test_serve_prints_ready() {
   setup 'serve prints ready'
   start_serve s1
-  [ "$(head -n 1 "$out")" = "ready${tab}$XDG_RUNTIME_DIR/claude-code-askpass/s1" ] || fail "ready line: $(head -n 1 "$out")"
+  [ "$(head -n 1 "$out")" = "ready${tab}$XDG_RUNTIME_DIR/cc-askpass/s1" ] || fail "ready line: $(head -n 1 "$out")"
   [ "$(ls -ld "$dir" | cut -c 1-10)" = 'drwx------' ] || fail "dir mode: $(ls -ld "$dir")"
   [ -p "$dir/req" ] || fail 'req is not a FIFO'
   teardown
@@ -128,7 +128,7 @@ test_reply_guard_does_not_create_a_file() {
 
 test_unsafe_tmp_base_is_refused() {
   setup 'unsafe tmp base is refused'
-  base="/tmp/claude-code-askpass-$(id -u)"
+  base="/tmp/cc-askpass-$(id -u)"
   if [ -e "$base" ] || [ -L "$base" ]; then
     echo "SKIP: $current: $base already exists"
   else
@@ -149,7 +149,7 @@ test_serve_twice_with_the_same_session_id() {
   stop_serve
   : > "$out"
   start_serve s1
-  [ "$(head -n 1 "$out")" = "ready${tab}$XDG_RUNTIME_DIR/claude-code-askpass/s1" ] || fail "ready line: $(head -n 1 "$out")"
+  [ "$(head -n 1 "$out")" = "ready${tab}$XDG_RUNTIME_DIR/cc-askpass/s1" ] || fail "ready line: $(head -n 1 "$out")"
   [ -p "$dir/req" ] || fail 'req is not a FIFO'
   teardown
 }

@@ -1,5 +1,5 @@
 #!/bin/sh
-# claude-code-askpass helper.
+# cc-askpass helper.
 #
 #   askpass --serve <session id>   Started by the mod: create the session dir and its
 #                                  request FIFO, print "ready<TAB><dir>", then copy every
@@ -7,7 +7,7 @@
 #   askpass <prompt>               Called by sudo/ssh/git as SUDO_ASKPASS/SSH_ASKPASS: send
 #                                  "<pid><TAB><prompt>" to the mod and print its reply.
 
-me=claude-code-askpass
+me=cc-askpass
 umask 077
 
 serve() {
@@ -39,7 +39,7 @@ serve() {
 
 ask() {
   if [ -z "${CC_ASKPASS_DIR:-}" ] || [ ! -d "$CC_ASKPASS_DIR" ]; then
-    echo "$me: CC_ASKPASS_DIR is not set; is the claude-code-askpass mod loaded in this Claude Code session?" >&2
+    echo "$me: CC_ASKPASS_DIR is not set; is the cc-askpass mod loaded in this Claude Code session?" >&2
     exit 1
   fi
   reply="$CC_ASKPASS_DIR/reply.$$"

@@ -1,5 +1,5 @@
 {
-  "name": "claude-code-askpass",
+  "name": "cc-askpass",
   "version": "0.1.0",
   "description": "Answer sudo/ssh askpass prompts from Claude's Bash commands with an in-app password pane",
   "author": { "name": "GoneTone" },

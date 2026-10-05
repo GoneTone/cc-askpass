@@ -1,4 +1,4 @@
-# claude-code-askpass Implementation Plan
+# cc-askpass Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,12 +8,12 @@
 
 **Tech Stack:** POSIX sh; Claude Code Mods API 2.1.289 (TypeScript/TSX hooks module, `claude-code/testing`); `claude plugin validate` / `claude plugin test`.
 
-**Spec:** `docs/superpowers/specs/2026-10-05-claude-code-askpass-design.md`
+**Spec:** `docs/superpowers/specs/2026-10-05-cc-askpass-design.md`
 
 ## Global Constraints
 
 - Code comments, log lines, error messages and UI copy: English.
-- Plugin name: `claude-code-askpass`; version `0.1.0`; license MIT.
+- Plugin name: `cc-askpass`; version `0.1.0`; license MIT.
 - All files LF (`.gitattributes`: `* text=auto eol=lf`); `bin/askpass` committed executable (`git update-index --chmod=+x bin/askpass`).
 - `bin/askpass` is POSIX sh: no bashisms (check with `sh -n` and, if available, `checkbashisms`/`shellcheck -s sh`).
 - The password never goes into `$.state`, `$.store`, logs, toasts, status, argv, or any file other than the reply FIFO.
@@ -78,20 +78,20 @@ Report each spike pass/fail with evidence. On a fail of spike 1 apply the spec's
 - Produces:
   - `bin/askpass --serve <session id>`: prints `ready\t<session dir>` then one request line per request; exits non-zero with a stderr message on an unsafe base dir.
   - `bin/askpass <prompt>`: writes `<own pid>\t<sanitized prompt>` to `$CC_ASKPASS_DIR/req`, reads one line from `$CC_ASKPASS_DIR/reply.<own pid>`, prints it, exit 0; empty reply → exit 1.
-  - Session dir: `${XDG_RUNTIME_DIR}/claude-code-askpass/<id>` or `/tmp/claude-code-askpass-<uid>/<id>`.
+  - Session dir: `${XDG_RUNTIME_DIR}/cc-askpass/<id>` or `/tmp/cc-askpass-<uid>/<id>`.
 
 - [ ] **Step 1: Write `.gitattributes`** with `* text=auto eol=lf`.
 
 - [ ] **Step 2: Write the failing shell tests in `tests/askpass.sh`**
 
 POSIX sh, a tiny `fail()` helper, each case in a function, `set -u`, temp `XDG_RUNTIME_DIR` per case (`mktemp -d`), serve run in background with stdout to a file, polling the file for lines (≤5 s). Cases:
-- `serve prints ready`: first line is `ready\t$XDG_RUNTIME_DIR/claude-code-askpass/s1`; dir mode `drwx------`; `req` is a FIFO.
+- `serve prints ready`: first line is `ready\t$XDG_RUNTIME_DIR/cc-askpass/s1`; dir mode `drwx------`; `req` is a FIFO.
 - `round trip keeps special characters`: start helper with `CC_ASKPASS_DIR=<dir> bin/askpass 'Password: ' > out &`; read its request from serve output, parse pid; write `'  p@ss \w$rd "é" '` + newline into `<dir>/reply.<pid>`; helper exits 0 and `out` equals the password byte-exact.
 - `empty reply exits 1`: reply with an empty line → helper exit status 1, `reply.<pid>` removed.
 - `prompt with tab and backslash`: prompt `$(printf 'a\tb\\c\n')` → request line is `<pid>\ta b\c ` (tab and newline become spaces, backslash kept).
 - `missing CC_ASKPASS_DIR exits 1`: unset → exit 1, stderr non-empty.
 - `reply guard does not create a file`: `printf 'pw\n' | sh -c '[ -p "$1" ] || exit 1; exec 3<>"$1"; cat >&3' _ <dir>/reply.999` → exit 1 and `<dir>/reply.999` does not exist.
-- `unsafe tmp base is refused`: with `XDG_RUNTIME_DIR` unset, and only if `/tmp/claude-code-askpass-$(id -u)` does not exist (otherwise print `SKIP` and continue), create it as a symlink to a temp dir, assert serve exits non-zero with stderr non-empty, then remove the symlink. No test-only env override in `bin/askpass`.
+- `unsafe tmp base is refused`: with `XDG_RUNTIME_DIR` unset, and only if `/tmp/cc-askpass-$(id -u)` does not exist (otherwise print `SKIP` and continue), create it as a symlink to a temp dir, assert serve exits non-zero with stderr non-empty, then remove the symlink. No test-only env override in `bin/askpass`.
 - `serve twice with the same session id`: start serve `s1`, kill it, start again with `s1` → second prints `ready` and `req` is a fresh FIFO.
 
 - [ ] **Step 3: Run to verify they fail**
@@ -149,7 +149,7 @@ git commit -m "feat: add askpass helper with serve mode"
 - [ ] **Step 1: Write failing tests in `hooks/core.test.ts`** (`import { test, expect } from 'claude-code/testing'`)
 
 - `splitLines joins a line split across chunks`: `splitLines('', '12\tPass')` → `{ lines: [], rest: '12\tPass' }`; then `splitLines('12\tPass', 'word: \n13\tx\n')` → `{ lines: ['12\tPassword: ', '13\tx'], rest: '' }`.
-- `parseReady`: `'ready\t/run/user/1000/claude-code-askpass/s1'` → that path; `'12\tx'` → `null`.
+- `parseReady`: `'ready\t/run/user/1000/cc-askpass/s1'` → that path; `'12\tx'` → `null`.
 - `parseRequest`: `'4242\t[sudo] password for alice: '` → `{ helperPid: 4242, prompt: '[sudo] password for alice: ' }`; `'abc\tx'`, `''`, `'0\tx'` → `null`.
 - `parseHelperPs`: `'  4100 /bin/sh /opt/p/bin/askpass [sudo] password: '` → `{ ppid: 4100, args: '/bin/sh /opt/p/bin/askpass [sudo] password: ' }`; `''` → `null`.
 - `isOurHelper`: true for the args above with `/opt/p/bin/askpass`; false for `/bin/sh /tmp/evil.sh` and for `/bin/sh /opt/p/bin/askpass-evil x`.
@@ -192,18 +192,18 @@ git commit -m "feat: add request parsing, verification and masking logic"
 
 - [ ] **Step 1: Write manifests**
 
-`.claude-plugin/plugin.json`: `{ "name": "claude-code-askpass", "version": "0.1.0", "description": "Answer sudo/ssh askpass prompts from Claude's Bash commands with an in-app password pane", "license": "MIT" }`. `hooks/hooks.json`: `{ "modules": ["./register.tsx"] }`.
+`.claude-plugin/plugin.json`: `{ "name": "cc-askpass", "version": "0.1.0", "description": "Answer sudo/ssh askpass prompts from Claude's Bash commands with an in-app password pane", "license": "MIT" }`. `hooks/hooks.json`: `{ "modules": ["./register.tsx"] }`.
 
 - [ ] **Step 2: Write failing tests in `hooks/lifecycle.test.ts`**
 
-Fake the serve process with a test hook beneath: `on('process.spawn', async function* ($, e) { ... })` yielding `{ stream: 'stdout', text: 'ready\t/run/user/1000/claude-code-askpass/S\n' }` then awaiting a promise the test controls. Capture `env.set`, `ui.toast`, `process.run` and `command.register` with hooks beneath. Fire `$.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })`.
+Fake the serve process with a test hook beneath: `on('process.spawn', async function* ($, e) { ... })` yielding `{ stream: 'stdout', text: 'ready\t/run/user/1000/cc-askpass/S\n' }` then awaiting a promise the test controls. Capture `env.set`, `ui.toast`, `process.run` and `command.register` with hooks beneath. Fire `$.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })`.
 - `session.start spawns serve with the session id`: spawn argv is `[<root>/bin/askpass, '--serve', <$.session.id()>]`.
-- `sets askpass env after ready`: `env.set` called with `CC_ASKPASS_DIR` = `/run/user/1000/claude-code-askpass/S`, `SUDO_ASKPASS` and `SSH_ASKPASS` = `<root>/bin/askpass`, `SSH_ASKPASS_REQUIRE` = `force`.
+- `sets askpass env after ready`: `env.set` called with `CC_ASKPASS_DIR` = `/run/user/1000/cc-askpass/S`, `SUDO_ASKPASS` and `SSH_ASKPASS` = `<root>/bin/askpass`, `SSH_ASKPASS_REQUIRE` = `force`.
 - `sets DISPLAY only when unset`: with `env.get('DISPLAY')` answering `undefined` → `DISPLAY` set to `:0`; answering `:1` → no `DISPLAY` set.
 - `no ready in 5 s toasts and sets nothing`: spawn yields nothing; advance the mocked clock 5000 ms → one toast, no `env.set`.
 - `serve exit unsets env`: end the fake spawn → `env.set(name, undefined)` for the four askpass vars, `DISPLAY` unset only in the case where the mod set it; one toast.
 - `session.start twice re-sets env`: second start spawns again and sets env again.
-- `session.end removes the session dir`: `process.run` called with `['rm', '-rf', '/run/user/1000/claude-code-askpass/S']`.
+- `session.end removes the session dir`: `process.run` called with `['rm', '-rf', '/run/user/1000/cc-askpass/S']`.
 - `registers /askpass as immediate`: `command.register` input has `name: 'askpass'`, `immediate: true`.
 
 - [ ] **Step 3: Run to verify they fail**
@@ -290,11 +290,11 @@ git commit -m "feat: verify requests and answer them from a password pane"
 **Files:**
 - Create: `README.md`, `README.zh-TW.md`, `README.zh-CN.md`, `LICENSE`, `.claude-plugin/marketplace.json`
 
-- [ ] **Step 1: Write `.claude-plugin/marketplace.json`** listing one plugin `claude-code-askpass` with `"source": "./"`. Check the exact schema with `claude plugin validate .`.
+- [ ] **Step 1: Write `.claude-plugin/marketplace.json`** listing one plugin `cc-askpass` with `"source": "./"`. Check the exact schema with `claude plugin validate .`.
 
 - [ ] **Step 2: Write `LICENSE`** (MIT, current year 2026, copyright holder as the human specifies; ask if unknown).
 
-- [ ] **Step 3: Write `README.md`** (English) with sections: what it does; install (`claude plugin marketplace add <repo URL>`, `claude plugin install claude-code-askpass@<marketplace>`); how it works (one diagram from spec §4); optional sudoers `Defaults:<user> timestamp_type=global` for ask-once behavior; limitations (spec §2 out-of-scope table, masking limitation or fallback per Task 1, same-uid limitation from spec §7, fake `DISPLAY` side effect, macOS untested); uninstall. Top line links: `English | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md)`.
+- [ ] **Step 3: Write `README.md`** (English) with sections: what it does; install (`claude plugin marketplace add <repo URL>`, `claude plugin install cc-askpass@<marketplace>`); how it works (one diagram from spec §4); optional sudoers `Defaults:<user> timestamp_type=global` for ask-once behavior; limitations (spec §2 out-of-scope table, masking limitation or fallback per Task 1, same-uid limitation from spec §7, fake `DISPLAY` side effect, macOS untested); uninstall. Top line links: `English | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md)`.
 
 - [ ] **Step 4: Write `README.zh-TW.md` and `README.zh-CN.md`**: same structure and content, same top link line with the current language unlinked.
 
