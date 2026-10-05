@@ -12,7 +12,7 @@ const PANE_PROPS = {
   scroll: { offset: 0, bodyRows: 20 },
   view: {},
 } as const
-const REPLY_SCRIPT = '[ -p "$1" ] || exit 1; exec 3<>"$1"; cat >&3'
+const REPLY_SCRIPT = '[ -p "$1" ] || exit 1; exec 3<>"$1"; [ -p /dev/fd/3 ] || { rm -f "$1"; exit 1; }; cat >&3'
 const SUDO_PROMPT = '[sudo] password for alice: '
 const SUDO_PARENT = 'root     sudo            sudo apt update'
 const PASSWORD = '  p@ss \\w$rd é '
@@ -24,6 +24,7 @@ async function world($: any, on: any) {
   mock.env(on, {})
   const serve = fakeServe(on)
   const ps = new Map<string, string>()
+  const exes = new Map<string, string>()
   const alive = new Set<number>()
   const rec = recorder(on, argv => {
     if (argv[0] === 'ps') {
@@ -31,6 +32,10 @@ async function world($: any, on: any) {
       return out === undefined ? { exitCode: 1 } : { stdout: `${out}\n` }
     }
     if (argv[0] === 'kill') return { exitCode: alive.has(Number(argv[2])) ? 0 : 1 }
+    if (argv[0] === 'sh' && argv[2]?.includes('readlink')) {
+      const out = exes.get(argv[argv.length - 1] ?? '')
+      return out === undefined ? { exitCode: 1 } : { stdout: `${out}\n` }
+    }
     return undefined
   })
   await $.session.start(START)
@@ -42,16 +47,27 @@ async function world($: any, on: any) {
     clock,
     rec,
     alive,
-    /** A helper `helperPid`, child of `parentPid`, asks with `prompt`. */
-    async request(helperPid: number, parentPid: number, prompt: string, parentPs: string, helperArgs = `/bin/sh ${askpass} ${prompt}`) {
-      ps.set(`helper:${helperPid}`, `${parentPid} ${helperArgs}`)
+    /**
+     * Sets up helper `helperPid`, child of `parentPid`, asking with `prompt`; `exe` is the
+     * parent's `<owner uid> <executable>` (a root-owned /usr/bin/<comm> by default).
+     */
+    stage(helperPid: number, parentPid: number, prompt: string, parentPs: string, options: { helperArgs?: string; exe?: string } = {}) {
+      ps.set(`helper:${helperPid}`, `${parentPid} ${options.helperArgs ?? `/bin/sh ${askpass} ${prompt}`}`)
       ps.set(`parent:${parentPid}`, parentPs)
+      exes.set(String(parentPid), options.exe ?? `0 /usr/bin/${parentPs.split(/\s+/)[1]}`)
       alive.add(helperPid)
-      serve.emit(`${helperPid}\t${prompt}\n`)
+      return `${helperPid}\t${prompt}\n`
+    },
+    /** A helper asks (see `stage`) and the mod has handled the request. */
+    async request(helperPid: number, parentPid: number, prompt: string, parentPs: string, options: { helperArgs?: string; exe?: string } = {}) {
+      serve.emit(this.stage(helperPid, parentPid, prompt, parentPs, options))
       await clock.settle()
     },
+    emit(text: string) {
+      serve.emit(text)
+    },
     replies() {
-      return rec.runs.filter(run => run.argv[0] === 'sh')
+      return rec.runs.filter(run => run.argv[0] === 'sh' && run.argv[2] === REPLY_SCRIPT)
     },
     mount(surface: (typeof SURFACES)[number]) {
       return $.ui.mount({ plugin: 'cc-askpass', surface, component: 'Pane', props: PANE_PROPS, requestId: 'askpass' })
@@ -138,10 +154,49 @@ for (const surface of ['mobile'] as const) {
 
 test('forged request is rejected', async ($, on) => {
   const w = await world($, on)
-  await w.request(6666, 6000, SUDO_PROMPT, SUDO_PARENT, '/bin/sh /tmp/evil.sh x')
+  await w.request(6666, 6000, SUDO_PROMPT, SUDO_PARENT, { helperArgs: '/bin/sh /tmp/evil.sh x' })
   expect(w.rec.opens).toEqual([])
   expect(w.replies()).toEqual([])
   expect(w.rec.toasts.filter(text => text.includes('Rejected forged askpass request'))).toHaveLength(1)
+})
+
+test('rejects askpass run straight from a shell', async ($, on) => {
+  const w = await world($, on)
+  await w.request(7000, 6900, SUDO_PROMPT, 'alice bash bash -c x')
+  expect(w.rec.opens).toEqual([])
+  expect(w.rec.toasts.filter(text => text.includes('Rejected askpass request from bash'))).toHaveLength(1)
+  expect(w.replies().map(reply => reply.stdin)).toEqual(['\n'])
+})
+
+test('rejects a client binary not owned by root', async ($, on) => {
+  const w = await world($, on)
+  await w.request(7000, 6900, 'Enter passphrase for key: ', 'alice ssh ssh -T host', { exe: '1000 /tmp/ssh' })
+  expect(w.rec.opens).toEqual([])
+  expect(w.rec.toasts.filter(text => text.includes('Rejected askpass request from ssh'))).toHaveLength(1)
+})
+
+test('two requests in one chunk open one pane at a time', async ($, on) => {
+  const w = await world($, on)
+  w.emit(
+    w.stage(4242, 4100, SUDO_PROMPT, SUDO_PARENT) +
+      w.stage(5000, 4900, 'Enter passphrase for key: ', 'alice ssh ssh -T git@github.com'),
+  )
+  await w.clock.settle()
+  expect(w.rec.opens).toHaveLength(1)
+  const ui = await w.mount('terminal')
+  await ui.input({ key: 'password-4242', text: 'x' })
+  await w.clock.settle()
+  expect(w.rec.opens.map(open => open.title)).toEqual(['sudo password', 'Password requested by ssh (pid 4900)'])
+})
+
+test('enter then cancel sends one reply', async ($, on) => {
+  const w = await world($, on)
+  await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+  const ui = await w.mount('terminal')
+  await Promise.allSettled([ui.input({ key: 'password-4242', text: 'x' }), ui.press({ key: 'cancel' })])
+  await w.clock.settle()
+  // Whichever lands first answers; the other must not send a second reply.
+  expect(w.replies()).toHaveLength(1)
 })
 
 test('cancel replies empty line', async ($, on) => {

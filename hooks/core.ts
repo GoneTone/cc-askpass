@@ -31,9 +31,15 @@ export function parseHelperPs(out: string): { ppid: number; args: string } | nul
   return ppid === undefined || args === undefined ? null : { ppid: Number(ppid), args }
 }
 
-/** Whether a helper's args run our askpass script, not a look-alike path. */
+/**
+ * Whether a helper's args run our askpass script: the path must be the program or its
+ * interpreter's first argument, so a path smuggled into the prompt text does not count.
+ */
 export function isOurHelper(args: string, askpassPath: string): boolean {
-  return ` ${args} `.includes(` ${askpassPath} `)
+  const afterInterpreter = args.slice(args.indexOf(' ') + 1)
+  return [args, afterInterpreter].some(
+    candidate => candidate === askpassPath || candidate.startsWith(`${askpassPath} `),
+  )
 }
 
 /** Output of `ps -o user=,comm=,args= -p <pid>`; macOS prints the full path in `comm`. */
@@ -54,11 +60,18 @@ export function shouldMask(isSudo: boolean, prompt: string): boolean {
 }
 
 /**
- * The real text behind a masked field, from the field's new text: longer means
- * characters were added at the end, shorter means characters were deleted from it.
+ * The real text behind a masked field, from the field's new text. Bullets stand for
+ * characters already typed; other characters are new and replace whatever bullets are
+ * missing around them (a select-all paste replaces everything). With no new characters,
+ * the text got shorter, taken as deleted from the end.
  */
 export function applyMaskedInput(real: string, shown: string): string {
-  return shown.length > real.length ? real + shown.slice(real.length) : real.slice(0, shown.length)
+  const leading = Math.min(/^•*/.exec(shown)?.[0].length ?? 0, real.length)
+  const rest = shown.slice(leading)
+  const trailing = Math.min(/•*$/.exec(rest)?.[0].length ?? 0, real.length - leading)
+  const inserted = rest.slice(0, rest.length - trailing)
+  if (inserted === '') return real.slice(0, shown.length)
+  return real.slice(0, leading) + inserted + real.slice(real.length - trailing)
 }
 
 /** Sudo pids already answered: a second request from one means the password was wrong. */
@@ -81,4 +94,26 @@ export class AnsweredPids {
       if (now - at > ANSWERED_TTL_MS) this.answeredAt.delete(pid)
     }
   }
+}
+
+// Programs other than sudo whose askpass answer goes back to them, not to the caller.
+// `comm` is cut at 15 characters: git-remote-https reads as git-remote-http.
+const ASKPASS_CLIENTS = ['ssh', 'ssh-add', 'scp', 'sftp', 'git', 'git-remote-http']
+
+export type ExeInfo = { uid: number; path: string }
+
+/** `<owner uid> <path>` of a process's resolved executable. */
+export function parseExeInfo(out: string): ExeInfo | null {
+  const [, uid, path] = /^(\d+) (.+)$/.exec(firstLine(out)) ?? []
+  return uid === undefined || path === undefined ? null : { uid: Number(uid), path }
+}
+
+/**
+ * Whether a non-sudo requester is a real ssh/git binary. Anything else, a shell running
+ * askpass directly included, would hand the answer to a command whose output Claude reads.
+ * A root-owned binary named like the process rules out scripts and copies in /tmp.
+ */
+export function isTrustedClient(requester: Requester, exe: ExeInfo | null): boolean {
+  if (exe === null || exe.uid !== 0 || !ASKPASS_CLIENTS.includes(requester.comm)) return false
+  return (exe.path.split('/').at(-1) ?? '').startsWith(requester.comm)
 }

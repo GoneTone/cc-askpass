@@ -58,7 +58,8 @@ When a session starts, the mod starts a small listener (`bin/askpass --serve`) a
 ## Security
 
 - The password is never written to the model's context, logs, toasts, the status line, command-line arguments, or files.
-- Requests that do not come from `bin/askpass` are rejected, and the pane shows the real command that asked, so a command cannot fake a sudo prompt to fish for your password.
+- Requests are accepted only from `bin/askpass` started by sudo running as root, or by root-owned `ssh`, `ssh-add`, `scp`, `sftp` or `git` binaries. Anything else, such as a command running `$SUDO_ASKPASS` itself to read your answer, is rejected.
+- The pane shows the real command that asked. Check it before you answer: an `ssh` or `git` command sends your answer to the server it names.
 - Limitation: a malicious process running as your own user can race to read the reply to a genuine request. cc-askpass keeps the password out of the model's context in normal use; it is not a sandbox against hostile code running as you.
 
 ## Limitations
@@ -70,6 +71,7 @@ When a session starts, the mod starts a small listener (`bin/askpass --serve`) a
 - On hosts without a display, the `DISPLAY=:0` placeholder may make a few graphical programs (for example `xdg-open`) try to reach an X server and fail.
 - The mobile app cannot show an input field; answer from the terminal or the desktop app.
 - ssh confirmation prompts (`SSH_ASKPASS_PROMPT=confirm`) appear as a plain text prompt.
+- On macOS, ssh and git prompts are rejected because the check that the caller is a real ssh/git binary needs Linux's `/proc`. sudo works.
 
 ## Uninstall
 

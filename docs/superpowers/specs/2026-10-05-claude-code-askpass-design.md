@@ -78,8 +78,11 @@ mod
   ├─ session.start: spawn `bin/askpass --serve <session id>`, wait for `ready\t<dir>`,
   │                 then $.env.set(...)
   ├─ each output line = one request → verify → queue → pane
-  └─ reply: $.process.run(["sh","-c",'[ -p "$1" ] || exit 1; exec 3<>"$1"; cat >&3',
+  └─ reply: $.process.run(["sh","-c",'[ -p "$1" ] || exit 1; exec 3<>"$1";
+                           [ -p /dev/fd/3 ] || { rm -f "$1"; exit 1; }; cat >&3',
                            "_", replyFifo], { stdin: password + "\n" })
+     (the second check catches the FIFO being removed between the test and the open,
+     since `<>` would create a regular file)
 ```
 
 ### 4.1 Repository layout
@@ -157,7 +160,13 @@ The mod never trusts what the request line says about its origin. For each line
 2. `ps -o user=,comm=,args= -p <ppid>`:
    - `user` is `root` and the basename of `comm` is `sudo` → **sudo request** (macOS `ps`
      prints the full path in `comm`).
-   - anything else → **other request**, labelled with the parent's `comm` and pid.
+   - anything else → **other request**, labelled with the parent's `comm` and pid, accepted only
+     when `comm` is `ssh`, `ssh-add`, `scp`, `sftp`, `git` or `git-remote-http` and the parent's
+     `/proc/<pid>/exe` resolves to a root-owned file named like `comm`. Otherwise it is
+     rejected with a toast and an empty reply: a shell running `$SUDO_ASKPASS` itself would
+     read the answer from the helper's stdout. macOS has no `/proc`, so ssh/git are rejected there.
+   - The helper path must be the program or its interpreter's first argument (`^(\S+ )?<path>`),
+     so a path smuggled into a sudo `-p` prompt does not pass.
 
 ### 5.2 Queue
 

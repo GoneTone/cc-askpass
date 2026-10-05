@@ -5,6 +5,8 @@ import {
   AnsweredPids,
   applyMaskedInput,
   isOurHelper,
+  isTrustedClient,
+  parseExeInfo,
   parseHelperPs,
   parseParentPs,
   parseReady,
@@ -17,11 +19,21 @@ const READY_TIMEOUT_MS = 5000
 const REPLY_TIMEOUT_MS = 5000
 const ALIVE_POLL_MS = 2000
 const PANE = 'askpass'
-// Refuses to write unless the target is still a FIFO, so a vanished helper never
-// leaves the password in a regular file; read-write so the open never blocks.
-const REPLY_SCRIPT = '[ -p "$1" ] || exit 1; exec 3<>"$1"; cat >&3'
+// Writes only into a FIFO: the first test skips a vanished helper, the second catches
+// the FIFO being removed between that test and the open (`<>` would create a file).
+// Read-write so the open never blocks.
+const REPLY_SCRIPT = '[ -p "$1" ] || exit 1; exec 3<>"$1"; [ -p /dev/fd/3 ] || { rm -f "$1"; exit 1; }; cat >&3'
+// `<owner uid> <path>` of a process's executable (Linux /proc).
+const EXE_SCRIPT = 't=$(readlink -f "/proc/$1/exe") || exit 1; printf \'%s %s\n\' "$(stat -c %u "$t")" "$t"'
 
-type Request = { helperPid: number; prompt: string; requester: Requester; isRetry: boolean }
+type Request = {
+  helperPid: number
+  prompt: string
+  requester: Requester
+  isRetry: boolean
+  // Set before the first await of an answer, so Enter, Esc and the alive poll answer once.
+  isAnswered?: boolean
+}
 
 // Module state. A hot reload starts it over and kills the serve child with the module.
 // The password lives only in `typed`, and only while its pane is open.
@@ -33,6 +45,7 @@ let serveGeneration = 0
 let stopServe = () => {}
 const queue: Request[] = []
 let current: Request | null = null
+let isAdvancing = false
 let typed = ''
 let isMasked = true
 let isStatusShown = false
@@ -47,26 +60,37 @@ function onRequestLine($: EngineInterface, line: string): void {
   void verify($, line).catch(error => log($, `request failed: ${String(error)}`))
 }
 
-/** Checks with `ps` that the request comes from our helper, and who asks. */
+/** Checks with `ps` that the request comes from our helper, and that its caller may ask. */
 async function verify($: EngineInterface, line: string): Promise<void> {
-  const request = parseRequest(line)
-  if (request === null) return log($, `ignored malformed request line: ${line}`)
+  const parsed = parseRequest(line)
+  if (parsed === null) return log($, `ignored malformed request line: ${line}`)
 
-  const helperPs = await $.process.run(['ps', '-o', 'ppid=,args=', '-p', String(request.helperPid)])
+  const helperPs = await $.process.run(['ps', '-o', 'ppid=,args=', '-p', String(parsed.helperPid)])
   const helper = parseHelperPs(helperPs.stdout)
   if (helper === null) return
   if (!isOurHelper(helper.args, askpassPath)) {
-    $.ui.toast(`Rejected forged askpass request (pid ${request.helperPid})`)
-    return log($, `rejected forged request from pid ${request.helperPid}: ${helper.args}`)
+    $.ui.toast(`Rejected forged askpass request (pid ${parsed.helperPid})`)
+    return log($, `rejected forged request from pid ${parsed.helperPid}: ${helper.args}`)
   }
 
   const parentPs = await $.process.run(['ps', '-o', 'user=,comm=,args=', '-p', String(helper.ppid)])
   const requester = parseParentPs(parentPs.stdout, helper.ppid)
   if (requester === null) return
+  const request: Request = { ...parsed, requester, isRetry: false }
 
-  const isRetry = requester.isSudo && answered.has(requester.pid, await $.clock.now())
-  queue.push({ ...request, requester, isRetry })
-  if (current === null) await showNext($)
+  if (!requester.isSudo) {
+    const exe = await $.process.run(['sh', '-c', EXE_SCRIPT, '_', String(requester.pid)])
+    if (!isTrustedClient(requester, exe.exitCode === 0 ? parseExeInfo(exe.stdout) : null)) {
+      // The helper is ours: an empty answer makes it fail at once instead of waiting.
+      $.ui.toast(`Rejected askpass request from ${requester.comm} (pid ${requester.pid})`)
+      log($, `rejected request from untrusted caller: ${requester.command}`)
+      return reply($, request, '')
+    }
+  }
+
+  request.isRetry = requester.isSudo && answered.has(requester.pid, await $.clock.now())
+  queue.push(request)
+  await showNext($)
 }
 
 async function isAlive($: EngineInterface, pid: number): Promise<boolean> {
@@ -94,24 +118,35 @@ async function openPane($: EngineInterface): Promise<void> {
   isStatusShown = true
 }
 
+/** Shows the next queued request whose helper is still alive; one caller at a time. */
 async function showNext($: EngineInterface): Promise<void> {
-  for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
-    if (!(await isAlive($, next.helperPid))) continue
-    current = next
-    typed = ''
-    isMasked = shouldMask(next.requester.isSudo, next.prompt)
-    const helperPid = next.helperPid
-    aliveTimer = $.clock.every(ALIVE_POLL_MS, () => {
-      void isAlive($, helperPid).then(alive => {
-        if (!alive && current?.helperPid === helperPid) void finish($)
+  if (current !== null || isAdvancing) return
+  isAdvancing = true
+  try {
+    for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+      if (!(await isAlive($, next.helperPid))) continue
+      const request = next
+      current = request
+      typed = ''
+      isMasked = shouldMask(request.requester.isSudo, request.prompt)
+      aliveTimer = $.clock.every(ALIVE_POLL_MS, () => {
+        void isAlive($, request.helperPid)
+          .then(alive => (alive || request.isAnswered ? undefined : finish($, request)))
+          .catch(error => log($, `alive check failed: ${String(error)}`))
       })
-    })
-    return openPane($)
+      await openPane($)
+      return
+    }
+  } finally {
+    isAdvancing = false
   }
+  // A request queued while the loop above was finishing its last check.
+  if (current === null && queue.length > 0) await showNext($)
 }
 
-/** Ends the current request (answered or not) and moves on to the next one. */
-async function finish($: EngineInterface): Promise<void> {
+/** Ends `request` (answered or not) and moves on to the next one; a no-op once it ended. */
+async function finish($: EngineInterface, request: Request): Promise<void> {
+  if (current !== request) return
   aliveTimer?.cancel()
   aliveTimer = null
   current = null
@@ -133,10 +168,11 @@ async function reply($: EngineInterface, request: Request, password: string): Pr
 }
 
 async function submit($: EngineInterface, request: Request, password: string): Promise<void> {
-  if (current !== request) return
+  if (current !== request || request.isAnswered) return
+  request.isAnswered = true
   await reply($, request, password)
   if (request.requester.isSudo) answered.mark(request.requester.pid, await $.clock.now())
-  await finish($)
+  await finish($, request)
 }
 
 async function setEnv($: EngineInterface): Promise<void> {
@@ -170,9 +206,13 @@ async function runServe($: EngineInterface): Promise<void> {
   stopServe = () => void serve.return(undefined as never)
 
   let isReady = false
+  let didGiveUp = false
+  let lastError = ''
+  const notStarted = () => $.ui.toast(`cc-askpass: the askpass listener did not start${lastError && `: ${lastError}`}`)
   const readyTimer = $.clock.after(READY_TIMEOUT_MS, () => {
     if (isReady || generation !== serveGeneration) return
-    $.ui.toast('cc-askpass: the askpass listener did not start')
+    didGiveUp = true
+    notStarted()
     stopServe()
   })
 
@@ -180,7 +220,8 @@ async function runServe($: EngineInterface): Promise<void> {
   try {
     for await (const chunk of serve) {
       if (chunk.stream !== 'stdout') {
-        void $.ui.log(`cc-askpass: ${chunk.text}`, { to: 'debug' })
+        lastError = chunk.text.trim()
+        log($, chunk.text)
         continue
       }
       const split = splitLines(rest, chunk.text)
@@ -199,11 +240,15 @@ async function runServe($: EngineInterface): Promise<void> {
       }
     }
   } catch (error) {
-    void $.ui.log(`cc-askpass: askpass listener failed: ${String(error)}`, { to: 'debug' })
+    log($, `askpass listener failed: ${String(error)}`)
   }
   readyTimer.cancel()
 
-  if (generation !== serveGeneration || !isReady) return
+  if (generation !== serveGeneration) return
+  if (!isReady) {
+    if (!didGiveUp) notStarted()
+    return
+  }
   await unsetEnv($)
   $.ui.toast('cc-askpass: the askpass listener stopped; sudo will not ask for passwords here')
 }
@@ -216,9 +261,7 @@ export const register: Register = on => {
       description: 'Open the pending password prompt',
       immediate: true,
     })
-    void runServe($).catch(error => {
-      void $.ui.log(`cc-askpass: askpass listener failed: ${String(error)}`, { to: 'debug' })
-    })
+    void runServe($).catch(error => log($, `askpass listener failed: ${String(error)}`))
     return started
   })
 

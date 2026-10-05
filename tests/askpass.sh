@@ -154,7 +154,23 @@ test_serve_twice_with_the_same_session_id() {
   teardown
 }
 
+test_serve_refuses_unsafe_session_ids() {
+  setup 'serve refuses unsafe session ids'
+  start_serve keep
+  for id in '' '.' '..' 'a/b'; do
+    "$askpass" --serve "$id" > /dev/null 2>&1
+    status=$?
+    [ "$status" -eq 1 ] || fail "id '$id': exit $status"
+  done
+  "$askpass" --serve > /dev/null 2>&1
+  status=$?
+  [ "$status" -eq 1 ] || fail "no id: exit $status"
+  [ -p "$XDG_RUNTIME_DIR/cc-askpass/keep/req" ] || fail 'another session dir was removed'
+  teardown
+}
+
 test_serve_prints_ready
+test_serve_refuses_unsafe_session_ids
 test_round_trip_keeps_special_characters
 test_empty_reply_exits_1
 test_prompt_with_tab_and_backslash

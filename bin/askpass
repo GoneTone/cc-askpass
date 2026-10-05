@@ -11,6 +11,13 @@ me=cc-askpass
 umask 077
 
 serve() {
+  # The id becomes a path under the base that gets `rm -rf`: refuse anything but a name.
+  case "$1" in
+    '' | . | .. | */*)
+      echo "$me: invalid session id '$1'" >&2
+      exit 1
+      ;;
+  esac
   if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
     base="$XDG_RUNTIME_DIR/$me"
   else

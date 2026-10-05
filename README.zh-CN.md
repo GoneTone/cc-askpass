@@ -58,7 +58,8 @@ Claude 的 Bash 命令 → sudo → bin/askpass → 请求 FIFO → cc-askpass m
 ## 安全性
 
 - 密码不会写入模型的 context、日志、toast、状态栏、命令行参数或任何文件。
-- 不是来自 `bin/askpass` 的请求会被拒绝；面板也会显示实际请求密码的命令，所以命令无法伪造 sudo 提示来骗取密码。
+- 只接受由以 root 身份运行的 sudo，或属于 root 的 `ssh`、`ssh-add`、`scp`、`sftp`、`git` 可执行文件所启动的 `bin/askpass` 请求。其他来源一律拒绝，例如命令自己运行 `$SUDO_ASKPASS` 来读取你的回答。
+- 面板会显示实际请求密码的命令，回答前请先确认：`ssh` 或 `git` 命令会把你的回答发送到它指定的服务器。
 - 限制：以你自己的用户身份运行的恶意程序，有机会在真正的请求进行时抢先读走回复。cc-askpass 的目标是正常使用时不让密码进入模型的 context，它不是防范同一用户下恶意程序的沙箱。
 
 ## 限制
@@ -70,6 +71,7 @@ Claude 的 Bash 命令 → sudo → bin/askpass → 请求 FIFO → cc-askpass m
 - 在没有图形界面的主机上，`DISPLAY=:0` 这个占位值可能让少数图形程序（例如 `xdg-open`）尝试连接 X server 而失败。
 - 移动端 app 无法显示输入框，请改在终端或桌面版 app 回答。
 - ssh 的确认提示（`SSH_ASKPASS_PROMPT=confirm`）会以普通文本输入的形式出现。
+- 在 macOS 上，ssh 和 git 的提示会被拒绝，因为确认调用者是真正 ssh/git 可执行文件的检查需要 Linux 的 `/proc`。sudo 可以正常使用。
 
 ## 卸载
 

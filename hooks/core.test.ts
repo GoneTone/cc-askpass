@@ -4,6 +4,8 @@ import {
   AnsweredPids,
   applyMaskedInput,
   isOurHelper,
+  isTrustedClient,
+  parseExeInfo,
   parseHelperPs,
   parseParentPs,
   parseReady,
@@ -49,6 +51,31 @@ test('isOurHelper matches the askpass path exactly', () => {
   expect(isOurHelper('/bin/sh /opt/p/bin/askpass [sudo] password: ', '/opt/p/bin/askpass')).toBe(true)
   expect(isOurHelper('/bin/sh /tmp/evil.sh', '/opt/p/bin/askpass')).toBe(false)
   expect(isOurHelper('/bin/sh /opt/p/bin/askpass-evil x', '/opt/p/bin/askpass')).toBe(false)
+})
+
+test('isOurHelper rejects the path smuggled in through a prompt', () => {
+  expect(isOurHelper('/bin/sh /tmp/evil  /opt/p/bin/askpass ', '/opt/p/bin/askpass')).toBe(false)
+  expect(isOurHelper('cat /opt/p/bin/askpass', '/opt/p/bin/askpass')).toBe(true)
+  expect(isOurHelper('/opt/p/bin/askpass [sudo] password: ', '/opt/p/bin/askpass')).toBe(true)
+})
+
+test('isTrustedClient accepts root-owned ssh and git binaries only', () => {
+  const ssh = { pid: 1, isSudo: false, comm: 'ssh', command: 'ssh host' }
+  expect(isTrustedClient(ssh, parseExeInfo('0 /usr/bin/ssh\n'))).toBe(true)
+  expect(isTrustedClient(ssh, parseExeInfo('1000 /tmp/ssh\n'))).toBe(false)
+  expect(isTrustedClient(ssh, parseExeInfo('0 /usr/bin/dash\n'))).toBe(false)
+  expect(isTrustedClient(ssh, null)).toBe(false)
+  const remote = { pid: 1, isSudo: false, comm: 'git-remote-http', command: 'git-remote-https origin' }
+  expect(isTrustedClient(remote, parseExeInfo('0 /usr/lib/git-core/git-remote-https\n'))).toBe(true)
+  const bash = { pid: 1, isSudo: false, comm: 'bash', command: 'bash -c x' }
+  expect(isTrustedClient(bash, parseExeInfo('0 /usr/bin/bash\n'))).toBe(false)
+})
+
+test('applyMaskedInput takes typed characters as replacing the bullets around them', () => {
+  expect(applyMaskedInput('abc', 'x')).toBe('x')
+  expect(applyMaskedInput('abc', 'xyz')).toBe('xyz')
+  expect(applyMaskedInput('abc', '••x•')).toBe('abxc')
+  expect(applyMaskedInput('abc', 'x•••')).toBe('xabc')
 })
 
 test('isOurHelper accepts a plugin path with spaces', () => {

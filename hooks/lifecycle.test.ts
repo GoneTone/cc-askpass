@@ -67,6 +67,19 @@ test('no ready in 5 s toasts and sets nothing', async ($, on) => {
   expect(rec.envSets).toEqual([])
 })
 
+test('serve exiting before ready toasts once', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, {})
+  const serve = fakeServe(on)
+  const rec = recorder(on)
+  await $.session.start(START)
+  serve.end()
+  await clock.settle()
+  await clock.advance(5000)
+  expect(rec.toasts).toHaveLength(1)
+  expect(rec.envSets).toEqual([])
+})
+
 test('serve exit unsets env', async ($, on) => {
   const clock = mock.clock(on)
   mock.env(on, {})
