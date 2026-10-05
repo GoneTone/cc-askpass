@@ -178,7 +178,11 @@ Requests are queued in arrival order; the pane serves one at a time. When a requ
   which is placed at any width. The status line is cleared when the pane opens or the
   request ends. `/askpass` with nothing pending toasts "No pending password request".
 - Submit → reply with the password, record the sudo pid, close/advance.
-- Esc → reply an empty line (the helper exits 1), advance.
+- Esc, the close mark, or the Cancel button → reply an empty line (the helper exits 1), advance.
+- The Input key is `password-<helper pid>`: an Input keeps its previous text when a pane
+  reopens with the same key, ignoring `value`.
+- On the mobile surface (no Input) the pane says "Answer this prompt in the terminal or the
+  desktop app."
 - While the pane is open, check `kill -0 <helper pid>` every 2 s (`$.clock.every`); if the
   helper is gone (Bash timeout, sudo killed), close the pane and advance.
 

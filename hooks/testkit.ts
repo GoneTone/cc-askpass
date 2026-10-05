@@ -22,7 +22,7 @@ export function fakeServe(on: On) {
     next.signal.addEventListener('abort', wakeAll)
     for (;;) {
       while (queue.length > 0 && !next.signal.aborted) yield { stream: 'stdout' as const, text: queue.shift() as string }
-      if (isEnded || next.signal.aborted) return { code: 1, signal: null }
+      if (isEnded || next.signal.aborted) return { value: { code: 1, signal: null } }
       await new Promise<void>(resolve => waiters.add(resolve))
     }
   })

@@ -5,29 +5,30 @@ const MAX_COMMAND_LENGTH = 200
 
 export type Requester = { pid: number; isSudo: boolean; comm: string; command: string }
 
+const firstLine = (out: string): string => out.split('\n')[0] ?? ''
+
 /** Splits streamed text into complete lines; `rest` is the unterminated tail. */
 export function splitLines(rest: string, chunk: string): { lines: string[]; rest: string } {
   const lines = (rest + chunk).split('\n')
-  return { lines: lines.slice(0, -1), rest: lines[lines.length - 1] }
+  return { lines: lines.slice(0, -1), rest: lines.at(-1) ?? '' }
 }
 
 /** The session dir from the serve process's first line, `ready<TAB><dir>`. */
 export function parseReady(line: string): string | null {
-  const match = /^ready\t(.+)$/.exec(line)
-  return match ? match[1] : null
+  return /^ready\t(.+)$/.exec(line)?.[1] ?? null
 }
 
 /** A helper's request line, `<pid><TAB><prompt>`. */
 export function parseRequest(line: string): { helperPid: number; prompt: string } | null {
-  const match = /^(\d+)\t(.*)$/.exec(line)
-  if (!match || Number(match[1]) <= 0) return null
-  return { helperPid: Number(match[1]), prompt: match[2] }
+  const [, pid, prompt] = /^(\d+)\t(.*)$/.exec(line) ?? []
+  if (pid === undefined || prompt === undefined || Number(pid) <= 0) return null
+  return { helperPid: Number(pid), prompt }
 }
 
-/** Output of `ps -o ppid=,args= -p <helper pid>`. */
+/** Output of `ps -o ppid=,args= -p <helper pid>`; the args keep the prompt's trailing space. */
 export function parseHelperPs(out: string): { ppid: number; args: string } | null {
-  const match = /^\s*(\d+)\s+(.*)$/.exec(out.split('\n')[0])
-  return match ? { ppid: Number(match[1]), args: match[2] } : null
+  const [, ppid, args] = /^\s*(\d+)\s+(.*)$/.exec(firstLine(out)) ?? []
+  return ppid === undefined || args === undefined ? null : { ppid: Number(ppid), args }
 }
 
 /** Whether a helper's args run our askpass script, not a look-alike path. */
@@ -37,10 +38,9 @@ export function isOurHelper(args: string, askpassPath: string): boolean {
 
 /** Output of `ps -o user=,comm=,args= -p <pid>`; macOS prints the full path in `comm`. */
 export function parseParentPs(out: string, pid: number): Requester | null {
-  const match = /^\s*(\S+)\s+(\S+)\s+(.*?)\s*$/.exec(out.split('\n')[0])
-  if (!match) return null
-  const [, user, commPath, args] = match
-  const comm = commPath.split('/').pop() ?? commPath
+  const [, user, commPath, args] = /^\s*(\S+)\s+(\S+)\s+(.*?)\s*$/.exec(firstLine(out)) ?? []
+  if (user === undefined || commPath === undefined || args === undefined) return null
+  const comm = commPath.split('/').at(-1) ?? commPath
   const command = args.length > MAX_COMMAND_LENGTH ? `${args.slice(0, MAX_COMMAND_LENGTH)}…` : args
   return { pid, isSudo: user === 'root' && comm === 'sudo', comm, command }
 }

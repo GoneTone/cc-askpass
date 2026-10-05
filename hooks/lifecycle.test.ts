@@ -12,8 +12,8 @@ test('session.start spawns serve with the session id', async ($, on) => {
   recorder(on)
   await $.session.start(START)
   await clock.settle()
-  const argv = serve.argvs[0]
-  expect(argv[0].endsWith('/bin/askpass')).toBe(true)
+  const argv = serve.argvs[0] ?? []
+  expect(argv[0]?.endsWith('/bin/askpass')).toBe(true)
   expect(argv.slice(1)).toEqual(['--serve', SESSION_ID])
 })
 
@@ -27,7 +27,7 @@ test('sets askpass env after ready', async ($, on) => {
   expect(rec.envSets).toEqual([])
   serve.emit(`ready\t${SESSION_DIR}\n`)
   await clock.settle()
-  const askpass = serve.argvs[0][0]
+  const askpass = serve.argvs[0]?.[0]
   expect(rec.envValue('CC_ASKPASS_DIR')).toBe(SESSION_DIR)
   expect(rec.envValue('SUDO_ASKPASS')).toBe(askpass)
   expect(rec.envValue('SSH_ASKPASS')).toBe(askpass)
@@ -122,7 +122,7 @@ test('session.end removes the session dir', async ($, on) => {
   await $.session.start(START)
   serve.emit(`ready\t${SESSION_DIR}\n`)
   await clock.settle()
-  await $.session.end({ reason: 'exit' } as Parameters<typeof $.session.end>[0])
+  await $.session.end({ reason: 'exit' } as never)
   expect(rec.runs.map(run => run.argv)).toContainEqual(['rm', '-rf', SESSION_DIR])
 })
 
