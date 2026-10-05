@@ -431,11 +431,14 @@ test('band button opens the pane and goes away', async ($, on) => {
   const band = await mountBand($)
   w.rec.setPlaced(true)
   const opensBefore = w.rec.opens.length
-  await band.press({ key: 'open-askpass' })
+  // The press lasts until the pane is open: an open after it would count as unasked.
+  const pressing = band.press({ key: 'open-askpass' })
+  await w.clock.settle()
   // The band lets go of the keyboard first: a pane opened while it holds the keys gets none.
   expect(await band.find({ key: 'open-askpass' })).toBeUndefined()
   expect(w.rec.opens.length).toBe(opensBefore)
   await w.clock.advance(150)
+  await pressing
   expect(w.rec.opens.length).toBe(opensBefore + 1)
 })
 

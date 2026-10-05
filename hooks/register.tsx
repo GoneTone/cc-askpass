@@ -169,6 +169,7 @@ async function openPane($: EngineInterface): Promise<void> {
     rows: 8,
     columns: 60,
   })
+  log($, `ui.open: ${JSON.stringify(opened)}`)
   if (opened.isPlaced) return clearWaiting($)
   // An open the person did not ask for waits on a narrow terminal. The band's button and
   // /askpass are opens they ask for, which are placed at any width.
@@ -179,13 +180,13 @@ async function openPane($: EngineInterface): Promise<void> {
 /**
  * Opens the pane from the band's button. While the band holds the keyboard a pane's focus
  * request is refused, so the band is cleared first and the pane opens once it has let go.
+ * The press handler returns this promise: an open after the press is over counts as one
+ * the person did not ask for, and waits unplaced on a narrow terminal.
  */
-function openFromBand($: EngineInterface): void {
+async function openFromBand($: EngineInterface): Promise<void> {
   clearWaiting($)
-  // A timer, not `await sleep`: a wait inside the press is dropped once the press is over.
-  $.clock.after(BAND_RELEASE_MS, () => {
-    void openPane($).catch(error => log($, `opening the pane failed: ${String(error)}`))
-  })
+  await $.clock.sleep(BAND_RELEASE_MS)
+  await openPane($)
 }
 
 /** Shows the next queued request whose helper is still alive; one caller at a time. */
