@@ -58,7 +58,13 @@ function log($: EngineInterface, text: string): void {
 }
 
 function onRequestLine($: EngineInterface, line: string): void {
-  void verify($, line).catch(error => log($, `request failed: ${String(error)}`))
+  void verify($, line).catch(error => {
+    // ps missing (a slim container) or failing: say so, and let the helper fail now.
+    $.ui.toast(`cc-askpass: could not check an askpass request: ${String(error)}`)
+    log($, `request failed: ${String(error)}`)
+    const parsed = parseRequest(line)
+    if (parsed !== null) void reply($, parsed.helperPid, '')
+  })
 }
 
 /** Checks with `ps` that the request comes from our helper, and that its caller may ask. */
@@ -85,7 +91,7 @@ async function verify($: EngineInterface, line: string): Promise<void> {
       // The helper is ours: an empty answer makes it fail at once instead of waiting.
       $.ui.toast(`Rejected askpass request from ${requester.comm} (pid ${requester.pid})`)
       log($, `rejected request from untrusted caller: ${requester.command}`)
-      return reply($, request, '')
+      return reply($, request.helperPid, '')
     }
   }
 
@@ -95,7 +101,8 @@ async function verify($: EngineInterface, line: string): Promise<void> {
 }
 
 async function isAlive($: EngineInterface, pid: number): Promise<boolean> {
-  return (await $.process.run(['kill', '-0', String(pid)])).exitCode === 0
+  // The shell's builtin kill: /bin/kill may not be installed.
+  return (await $.process.run(['sh', '-c', 'kill -0 "$1"', '_', String(pid)])).exitCode === 0
 }
 
 function paneTitle(requester: Requester): string {
@@ -156,21 +163,21 @@ async function finish($: EngineInterface, request: Request): Promise<void> {
   await showNext($)
 }
 
-async function reply($: EngineInterface, request: Request, password: string): Promise<void> {
+async function reply($: EngineInterface, helperPid: number, password: string): Promise<void> {
   try {
-    await $.process.run(['sh', '-c', REPLY_SCRIPT, '_', `${sessionDir}/reply.${request.helperPid}`], {
+    await $.process.run(['sh', '-c', REPLY_SCRIPT, '_', `${sessionDir}/reply.${helperPid}`], {
       stdin: `${password}\n`,
       timeoutMs: REPLY_TIMEOUT_MS,
     })
   } catch (error) {
-    log($, `reply to pid ${request.helperPid} failed: ${String(error)}`)
+    log($, `reply to pid ${helperPid} failed: ${String(error)}`)
   }
 }
 
 async function submit($: EngineInterface, request: Request, password: string): Promise<void> {
   if (current !== request || request.isAnswered) return
   request.isAnswered = true
-  await reply($, request, password)
+  await reply($, request.helperPid, password)
   if (request.requester.isSudo) answered.mark(request.requester.pid, await $.clock.now())
   await finish($, request)
 }
@@ -180,9 +187,13 @@ async function setEnv($: EngineInterface): Promise<void> {
   await $.env.set('SUDO_ASKPASS', askpassPath)
   await $.env.set('SSH_ASKPASS', askpassPath)
   await $.env.set('SSH_ASKPASS_REQUIRE', 'force')
-  // sudo only uses askpass when DISPLAY is set; a real display is left alone.
-  if ((await $.env.get('DISPLAY')) === undefined) {
+  // sudo only uses askpass when DISPLAY is set; a real display is left alone. The marker
+  // survives a hot reload (module variables do not), so ownership of :0 is not forgotten.
+  const display = await $.env.get('DISPLAY')
+  const isOurs = display === ':0' && (await $.env.get('CC_ASKPASS_SET_DISPLAY')) === '1'
+  if (display === undefined || isOurs) {
     await $.env.set('DISPLAY', ':0')
+    await $.env.set('CC_ASKPASS_SET_DISPLAY', '1')
     didSetDisplay = true
   }
 }
@@ -194,6 +205,7 @@ async function unsetEnv($: EngineInterface): Promise<void> {
   await $.env.set('SSH_ASKPASS_REQUIRE', undefined)
   if (didSetDisplay) {
     await $.env.set('DISPLAY', undefined)
+    await $.env.set('CC_ASKPASS_SET_DISPLAY', undefined)
     didSetDisplay = false
   }
 }

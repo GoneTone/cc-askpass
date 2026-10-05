@@ -43,6 +43,33 @@ test('sets DISPLAY when unset', async ($, on) => {
   serve.emit(`ready\t${SESSION_DIR}\n`)
   await clock.settle()
   expect(rec.envValue('DISPLAY')).toBe(':0')
+  expect(rec.envValue('CC_ASKPASS_SET_DISPLAY')).toBe('1')
+})
+
+test('keeps a real DISPLAY of :0 (WSLg)', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { DISPLAY: ':0' })
+  const serve = fakeServe(on)
+  const rec = recorder(on)
+  await $.session.start(START)
+  serve.emit(`ready\t${SESSION_DIR}\n`)
+  await clock.settle()
+  serve.end()
+  await clock.settle()
+  expect(rec.envSets.some(set => set.name === 'DISPLAY')).toBe(false)
+})
+
+test('after a reload, still owns the DISPLAY it set before', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { DISPLAY: ':0', CC_ASKPASS_SET_DISPLAY: '1' })
+  const serve = fakeServe(on)
+  const rec = recorder(on)
+  await $.session.start(START)
+  serve.emit(`ready\t${SESSION_DIR}\n`)
+  await clock.settle()
+  serve.end()
+  await clock.settle()
+  expect(rec.envSets.filter(set => set.value === undefined).map(set => set.name)).toContain('DISPLAY')
 })
 
 test('keeps an existing DISPLAY', async ($, on) => {
@@ -92,7 +119,7 @@ test('serve exit unsets env', async ($, on) => {
   await clock.settle()
   for (const name of [...ASKPASS_VARS, 'DISPLAY']) expect(rec.envValue(name)).toBe(undefined)
   expect(rec.envSets.filter(set => set.value === undefined).map(set => set.name).sort()).toEqual(
-    [...ASKPASS_VARS, 'DISPLAY'].sort(),
+    [...ASKPASS_VARS, 'CC_ASKPASS_SET_DISPLAY', 'DISPLAY'].sort(),
   )
   expect(rec.toasts).toHaveLength(1)
 })

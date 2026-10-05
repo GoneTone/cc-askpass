@@ -115,7 +115,10 @@ POSIX sh, no bashisms. Two modes.
    set, else `/tmp/cc-askpass-$(id -u)`. Create it with `mkdir` (mode 0700); if it
    already exists, require that it is a directory, not a symlink, owned by the current user
    (`[ -d ] && [ ! -L ] && [ -O ]`), else exit 1 with a message on stderr.
-2. Session dir: `<base>/<session id>`. Remove it if present, recreate (0700), `mkfifo req`.
+2. Session id must not be empty, `.`, `..` or contain `/`. Session dir:
+   `<base>/<session id>-<pid of the Claude Code process>` (two processes resuming one session
+   keep separate dirs). Remove it if present, recreate (0700), `mkfifo req`, write the serve
+   shell's pid to `serve.pid`.
 3. Print `ready\t<session dir>`.
 4. `exec 3<>req`, then `while IFS= read -r line <&3; do printf '%s\n' "$line"; done`.
    Only shell builtins run in the loop, so killing the shell leaves no child behind, and
@@ -123,11 +126,16 @@ POSIX sh, no bashisms. Two modes.
 
 **`askpass <prompt>`** (called by sudo/ssh/git):
 
-1. If `CC_ASKPASS_DIR` is unset or not a directory: message on stderr, exit 1.
-2. `umask 077`; `mkfifo "$CC_ASKPASS_DIR/reply.$$"`; exit 1 if that fails.
-3. Start a watchdog: background `sleep 600` that kills the helper on expiry.
-   `trap` on EXIT/INT/TERM/HUP removes the reply FIFO and kills the watchdog.
-4. Write one line to `req`: `<own pid>\t<prompt with tabs and newlines replaced by spaces>`.
+1. If `CC_ASKPASS_DIR` is unset or not a directory, or the pid in `serve.pid` is not alive
+   (the mod was disabled mid-session): message on stderr, exit 1.
+2. `umask 077`; remove a stale `reply.$$` (left by a SIGKILLed helper with this pid), then
+   `mkfifo "$CC_ASKPASS_DIR/reply.$$"`; exit 1 if that fails.
+3. Start a watchdog with stdin/stdout/stderr on /dev/null (ssh and git read askpass output
+   until EOF): it checks every 5 s that the helper is alive, exits when it is not, and kills
+   the helper after 10 minutes. `trap` on EXIT/INT/TERM/HUP removes the reply FIFO and kills
+   the watchdog.
+4. Write one line to `req`: `<own pid>\t<prompt with tabs and newlines replaced by spaces,
+   cut to 1000 characters>` (well under PIPE_BUF, so concurrent writes never interleave).
 5. Read one line from the reply FIFO. Empty → exit 1 (sudo prints "no password was
    provided"). Otherwise print it to stdout, exit 0.
 
@@ -138,7 +146,8 @@ POSIX sh, no bashisms. Two modes.
   - `$.env.set("CC_ASKPASS_DIR", dir)`
   - `$.env.set("SUDO_ASKPASS", askpassPath)`, `$.env.set("SSH_ASKPASS", askpassPath)`
   - `$.env.set("SSH_ASKPASS_REQUIRE", "force")`
-  - `DISPLAY`: only if unset, set to `:0` and remember that we set it.
+  - `DISPLAY`: only if unset, set to `:0` and set `CC_ASKPASS_SET_DISPLAY=1`. A `:0` with that
+    marker is ours (the marker survives a hot reload); a `:0` without it (WSLg) is left alone.
   - Register `/askpass` (`immediate: true`).
   - Every later output line is passed to request handling (section 5).
 - **Serve exits unexpectedly** (not a module unload): unset the variables above (`DISPLAY`
@@ -199,7 +208,7 @@ Requests are queued in arrival order; the pane serves one at a time. When a requ
   reopens with the same key, ignoring `value`.
 - On the mobile surface (no Input) the pane says "Answer this prompt in the terminal or the
   desktop app."
-- While the pane is open, check `kill -0 <helper pid>` every 2 s (`$.clock.every`); if the
+- While the pane is open, check `sh -c 'kill -0 \"$1\"'` (the builtin; `/bin/kill` may be absent) every 2 s (`$.clock.every`); if the
   helper is gone (Bash timeout, sudo killed), close the pane and advance.
 
 ### 5.4 No password cache
@@ -236,6 +245,7 @@ README): sudo then caches the authentication, not the password.
 | Reply FIFO missing when replying | `[ -p ]` guard exits 1; nothing is written to a regular file |
 | Reply write fails or exceeds 5 s | Debug log; advance the queue |
 | Malformed request line | Ignore; debug log |
+| `ps` missing or failing while checking a request | Toast "could not check an askpass request", reply empty |
 | Forged request (helper is not our askpass) | Not shown, not answered; toast + debug log |
 
 ## 7. Security boundaries

@@ -31,9 +31,11 @@ serve() {
   fi
   chmod 700 "$base" || exit 1
 
-  dir="$base/$1"
+  # One dir per Claude Code process: two processes resuming one session must not share it.
+  dir="$base/$1-$PPID"
   rm -rf "$dir"
   mkdir "$dir" && mkfifo "$dir/req" || exit 1
+  printf '%s\n' "$$" > "$dir/serve.pid"
   printf 'ready\t%s\n' "$dir"
 
   # Opened read-write so the loop never sees EOF; builtins only, so killing this
@@ -49,24 +51,36 @@ ask() {
     echo "$me: CC_ASKPASS_DIR is not set; is the cc-askpass mod loaded in this Claude Code session?" >&2
     exit 1
   fi
+  # With the mod gone (disabled mid-session) nothing reads req: fail now instead of waiting.
+  if ! IFS= read -r listener < "$CC_ASKPASS_DIR/serve.pid" || ! kill -0 "$listener" 2> /dev/null; then
+    echo "$me: the cc-askpass listener is not running; restart Claude Code or re-enable the mod" >&2
+    exit 1
+  fi
   reply="$CC_ASKPASS_DIR/reply.$$"
+  # A helper killed with SIGKILL leaves its FIFO behind for the next owner of its pid.
+  rm -f "$reply"
   mkfifo "$reply" || exit 1
   # Held open read-write before the request goes out, so a reply written early is kept.
   exec 4<> "$reply"
 
-  # Give up after 10 minutes, the Bash tool's longest timeout. The watchdog kills its
-  # own sleep when it is stopped, so nothing outlives the helper.
+  # Give up after 10 minutes, the Bash tool's longest timeout. The watchdog checks in
+  # every 5 s so it ends soon after the helper does (and never kills a recycled pid), and
+  # its output goes nowhere: ssh and git read ours until EOF.
   (
-    trap 'kill "$sleeper" 2> /dev/null; exit 0' TERM
-    sleep 600 &
-    sleeper=$!
-    wait "$sleeper" && kill "$$" 2> /dev/null
-  ) &
+    i=0
+    while [ "$i" -lt 120 ]; do
+      sleep 5
+      kill -0 "$$" 2> /dev/null || exit 0
+      i=$((i + 1))
+    done
+    kill "$$" 2> /dev/null
+  ) > /dev/null 2>&1 < /dev/null &
   watchdog=$!
   trap 'rm -f "$reply"; kill "$watchdog" 2> /dev/null' EXIT
   trap 'exit 1' INT TERM HUP
 
-  prompt=$(printf '%s' "$1" | tr '\t\n' '  ')
+  # Cut well under PIPE_BUF so concurrent helpers' lines never interleave.
+  prompt=$(printf '%s' "$1" | tr '\t\n' '  ' | cut -c 1-1000)
   printf '%s\t%s\n' "$$" "$prompt" > "$CC_ASKPASS_DIR/req" || exit 1
 
   IFS= read -r pw <&4

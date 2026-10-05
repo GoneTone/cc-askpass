@@ -26,12 +26,15 @@ async function world($: any, on: any) {
   const ps = new Map<string, string>()
   const exes = new Map<string, string>()
   const alive = new Set<number>()
+  let isPsMissing = false
   const rec = recorder(on, argv => {
+    if (argv[0] === 'ps' && isPsMissing) throw new Error('ps: command not found')
     if (argv[0] === 'ps') {
       const out = ps.get(`${argv[2] === 'ppid=,args=' ? 'helper' : 'parent'}:${argv[argv.length - 1]}`)
       return out === undefined ? { exitCode: 1 } : { stdout: `${out}\n` }
     }
-    if (argv[0] === 'kill') return { exitCode: alive.has(Number(argv[2])) ? 0 : 1 }
+    // The shell's own kill: /bin/kill may be missing.
+    if (argv[0] === 'sh' && argv[2] === 'kill -0 "$1"') return { exitCode: alive.has(Number(argv[4])) ? 0 : 1 }
     if (argv[0] === 'sh' && argv[2]?.includes('readlink')) {
       const out = exes.get(argv[argv.length - 1] ?? '')
       return out === undefined ? { exitCode: 1 } : { stdout: `${out}\n` }
@@ -47,6 +50,9 @@ async function world($: any, on: any) {
     clock,
     rec,
     alive,
+    breakPs() {
+      isPsMissing = true
+    },
     /**
      * Sets up helper `helperPid`, child of `parentPid`, asking with `prompt`; `exe` is the
      * parent's `<owner uid> <executable>` (a root-owned /usr/bin/<comm> by default).
@@ -158,6 +164,15 @@ test('forged request is rejected', async ($, on) => {
   expect(w.rec.opens).toEqual([])
   expect(w.replies()).toEqual([])
   expect(w.rec.toasts.filter(text => text.includes('Rejected forged askpass request'))).toHaveLength(1)
+})
+
+test('a failing ps check toasts and answers empty', async ($, on) => {
+  const w = await world($, on)
+  w.breakPs()
+  await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+  expect(w.rec.opens).toEqual([])
+  expect(w.rec.toasts.filter(text => text.includes('could not check an askpass request'))).toHaveLength(1)
+  expect(w.replies().map(reply => reply.stdin)).toEqual(['\n'])
 })
 
 test('rejects askpass run straight from a shell', async ($, on) => {
