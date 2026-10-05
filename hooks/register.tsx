@@ -355,7 +355,7 @@ export const register: Register = on => {
         <Box flexDirection="column">
           <Text bold>{paneHeading(request.requester)}</Text>
           <Text dimColor wrap="truncate-end">
-            Requested by: {request.requester.command}
+            $ {request.requester.command}
           </Text>
         </Box>
         <Box flexDirection="column">
