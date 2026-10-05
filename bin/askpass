@@ -1,0 +1,74 @@
+#!/bin/sh
+# claude-code-askpass helper.
+#
+#   askpass --serve <session id>   Started by the mod: create the session dir and its
+#                                  request FIFO, print "ready<TAB><dir>", then copy every
+#                                  request line to stdout.
+#   askpass <prompt>               Called by sudo/ssh/git as SUDO_ASKPASS/SSH_ASKPASS: send
+#                                  "<pid><TAB><prompt>" to the mod and print its reply.
+
+me=claude-code-askpass
+umask 077
+
+serve() {
+  if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    base="$XDG_RUNTIME_DIR/$me"
+  else
+    base="/tmp/$me-$(id -u)"
+  fi
+  # A shared /tmp lets another user pre-create the base: refuse anything we do not own.
+  mkdir "$base" 2> /dev/null
+  if [ -L "$base" ] || [ ! -d "$base" ] || [ ! -O "$base" ]; then
+    echo "$me: unsafe runtime dir $base" >&2
+    exit 1
+  fi
+  chmod 700 "$base" || exit 1
+
+  dir="$base/$1"
+  rm -rf "$dir"
+  mkdir "$dir" && mkfifo "$dir/req" || exit 1
+  printf 'ready\t%s\n' "$dir"
+
+  # Opened read-write so the loop never sees EOF; builtins only, so killing this
+  # shell leaves no child behind.
+  exec 3<> "$dir/req"
+  while IFS= read -r line <&3; do
+    printf '%s\n' "$line"
+  done
+}
+
+ask() {
+  if [ -z "${CC_ASKPASS_DIR:-}" ] || [ ! -d "$CC_ASKPASS_DIR" ]; then
+    echo "$me: CC_ASKPASS_DIR is not set; is the claude-code-askpass mod loaded in this Claude Code session?" >&2
+    exit 1
+  fi
+  reply="$CC_ASKPASS_DIR/reply.$$"
+  mkfifo "$reply" || exit 1
+  # Held open read-write before the request goes out, so a reply written early is kept.
+  exec 4<> "$reply"
+
+  # Give up after 10 minutes, the Bash tool's longest timeout. The watchdog kills its
+  # own sleep when it is stopped, so nothing outlives the helper.
+  (
+    trap 'kill "$sleeper" 2> /dev/null; exit 0' TERM
+    sleep 600 &
+    sleeper=$!
+    wait "$sleeper" && kill "$$" 2> /dev/null
+  ) &
+  watchdog=$!
+  trap 'rm -f "$reply"; kill "$watchdog" 2> /dev/null' EXIT
+  trap 'exit 1' INT TERM HUP
+
+  prompt=$(printf '%s' "$1" | tr '\t\n' '  ')
+  printf '%s\t%s\n' "$$" "$prompt" > "$CC_ASKPASS_DIR/req" || exit 1
+
+  IFS= read -r pw <&4
+  [ -n "$pw" ] || exit 1
+  printf '%s\n' "$pw"
+}
+
+if [ "${1:-}" = --serve ]; then
+  serve "$2"
+else
+  ask "${1:-}"
+fi
