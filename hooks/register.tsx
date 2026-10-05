@@ -24,6 +24,8 @@ import {
 const READY_TIMEOUT_MS = 5000
 const REPLY_TIMEOUT_MS = 5000
 const ALIVE_POLL_MS = 2000
+// Time for the band to drop its button and hand the keyboard back (verified at 150 ms).
+const BAND_RELEASE_MS = 150
 const PANE = 'askpass'
 // Writes only into a FIFO: the first test skips a vanished helper, the second catches
 // the FIFO being removed between that test and the open (`<>` would create a file).
@@ -172,6 +174,16 @@ async function openPane($: EngineInterface): Promise<void> {
   // /askpass are opens they ask for, which are placed at any width.
   isWaitingForOpen = true
   $.ui.invalidate('ui.render')
+}
+
+/**
+ * Opens the pane from the band's button. While the band holds the keyboard a pane's focus
+ * request is refused, so the band is cleared first and the pane opens once it has let go.
+ */
+async function openFromBand($: EngineInterface): Promise<void> {
+  clearWaiting($)
+  await $.clock.sleep(BAND_RELEASE_MS)
+  await openPane($)
 }
 
 /** Shows the next queued request whose helper is still alive; one caller at a time. */
@@ -378,7 +390,7 @@ export const register: Register = on => {
         </Text>
         <Box>
           {/* ctrl+x tab hands the band the keys; the ring starts here so Enter presses it. */}
-          <Button key="open-askpass" variant="primary" autoFocus onPress={() => void openPane($)}>
+          <Button key="open-askpass" variant="primary" autoFocus onPress={() => void openFromBand($)}>
             Open password prompt
           </Button>
         </Box>

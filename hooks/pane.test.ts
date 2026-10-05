@@ -432,8 +432,11 @@ test('band button opens the pane and goes away', async ($, on) => {
   w.rec.setPlaced(true)
   const opensBefore = w.rec.opens.length
   await band.press({ key: 'open-askpass' })
-  expect(w.rec.opens.length).toBe(opensBefore + 1)
+  // The band lets go of the keyboard first: a pane opened while it holds the keys gets none.
   expect(await band.find({ key: 'open-askpass' })).toBeUndefined()
+  expect(w.rec.opens.length).toBe(opensBefore)
+  await w.clock.advance(150)
+  expect(w.rec.opens.length).toBe(opensBefore + 1)
 })
 
 test('/askpass still opens the pane from a narrow terminal', async ($, on) => {
