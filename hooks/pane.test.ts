@@ -96,7 +96,8 @@ for (const surface of SURFACES) {
     const ui = await w.mount(surface)
     expect(await ui.find({ text: /sudo needs your password/ })).toBeDefined()
     expect(await ui.find({ text: /sudo apt update/ })).toBeDefined()
-    expect((await ui.find({ key: 'password-4242' }))?.props.label).toBe(SUDO_PROMPT)
+    expect((await ui.find({ key: 'password-4242' }))?.props.label).toBe('[sudo] password for alice')
+    expect(await ui.find({ text: /Requested by: sudo apt update/ })).toBeDefined()
   })
 
   test(`reply stdin is password plus newline (${surface})`, async ($, on) => {

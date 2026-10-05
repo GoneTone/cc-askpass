@@ -11,6 +11,7 @@ import {
   parseParentPs,
   parseReady,
   parseRequest,
+  promptLabel,
   shouldMask,
   splitLines,
 } from './core'
@@ -354,14 +355,14 @@ export const register: Register = on => {
         <Box flexDirection="column">
           <Text bold>{paneHeading(request.requester)}</Text>
           <Text dimColor wrap="truncate-end">
-            $ {request.requester.command}
+            Requested by: {request.requester.command}
           </Text>
         </Box>
         <Box flexDirection="column">
           {request.isRetry && <Text color="red">Sorry, try again.</Text>}
           <Input
             key={key}
-            label={request.prompt}
+            label={promptLabel(request.prompt)}
             autoFocus
             value={isMasked ? '•'.repeat(typed.length) : typed}
             submitLabel="send"

@@ -10,6 +10,7 @@ import {
   parseParentPs,
   parseReady,
   parseRequest,
+  promptLabel,
   shouldMask,
   splitLines,
 } from './core'
@@ -111,6 +112,16 @@ test('shouldMask masks everything but known non-secret prompts', () => {
   expect(shouldMask(false, 'Are you sure you want to continue connecting (yes/no/[fingerprint])? ')).toBe(false)
   expect(shouldMask(false, '[sudo] Passwort für alice: ')).toBe(true)
   expect(shouldMask(false, 'Enter PIN: ')).toBe(true)
+})
+
+test('promptLabel drops the trailing colon the Input draws itself', () => {
+  expect(promptLabel('[sudo] password for alice: ')).toBe('[sudo] password for alice')
+  expect(promptLabel("Enter passphrase for key '/x': ")).toBe("Enter passphrase for key '/x'")
+  expect(promptLabel('Password:')).toBe('Password')
+  expect(promptLabel('[sudo] パスワード： ')).toBe('[sudo] パスワード')
+  expect(promptLabel('Are you sure you want to continue connecting (yes/no/[fingerprint])? ')).toBe(
+    'Are you sure you want to continue connecting (yes/no/[fingerprint])?',
+  )
 })
 
 test('applyMaskedInput tracks appends and deletes', () => {

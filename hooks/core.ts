@@ -51,6 +51,11 @@ export function parseParentPs(out: string, pid: number): Requester | null {
   return { pid, isSudo: user === 'root' && comm === 'sudo', comm, command }
 }
 
+/** A prompt as an Input label: the Input draws its own colon after the label. */
+export function promptLabel(prompt: string): string {
+  return prompt.replace(/\s*[:：]?\s*$/, '')
+}
+
 /**
  * Masks by default: prompts are localized, so only prompts known not to be secret
  * (git's untranslated username prompt, ssh's host-key question) are shown in clear.
