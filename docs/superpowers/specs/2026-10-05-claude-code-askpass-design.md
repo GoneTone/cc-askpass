@@ -99,6 +99,7 @@ bin/askpass                       POSIX sh helper (executable bit committed)
 tests/askpass.sh                  shell round-trip test, run on Linux/WSL
 README.md, README.zh-TW.md, README.zh-CN.md   each links to the other two at the top
 LICENSE                           MIT
+.gitattributes                    `* text=auto eol=lf` (bin/askpass breaks with CRLF)
 ```
 
 ### 4.2 `bin/askpass`
