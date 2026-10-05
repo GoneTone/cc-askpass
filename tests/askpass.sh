@@ -256,6 +256,44 @@ test_two_processes_resuming_one_session() {
   teardown
 }
 
+test_restarted_serve_resends_pending_requests() {
+  setup 'a restarted listener resends requests still waiting'
+  start_serve s1
+  requests=0
+  start_helper 'Password: '
+  stop_serve
+  : > "$out"
+  start_serve s1
+  if wait_lines "$out" 2 && [ -p "$dir/reply.$helper_pid" ]; then
+    [ "$(sed -n 2p "$out")" = "$helper_pid${tab}Password: " ] || fail "resent: $(sed -n 2p "$out")"
+    printf 'pw\n' > "$dir/reply.$helper_pid"
+    wait "$helper_pid"
+    status=$?
+    [ "$status" -eq 0 ] || fail "helper exit $status"
+    printf 'pw\n' | cmp -s - "$tmp/helper.out" || fail "helper printed: $(cat "$tmp/helper.out")"
+    [ ! -e "$dir/request.$helper_pid" ] || fail 'request file left behind'
+  else
+    fail 'pending request was not resent'
+    kill "$helper_pid" 2> /dev/null
+  fi
+  teardown
+}
+
+test_restarted_serve_drops_dead_requests() {
+  setup 'a restarted listener drops requests whose helper died'
+  start_serve s1
+  requests=0
+  start_helper 'Password: '
+  kill -9 "$helper_pid"
+  stop_serve
+  : > "$out"
+  start_serve s1
+  sleep 0.3
+  [ "$(wc -l < "$out")" -eq 1 ] || fail "resent a dead request: $(sed -n 2p "$out")"
+  [ ! -e "$dir/request.$helper_pid" ] || fail 'dead request file left behind'
+  teardown
+}
+
 test_serve_prints_ready
 test_serve_refuses_unsafe_session_ids
 test_serve_trims_trailing_slash
@@ -271,6 +309,8 @@ test_stale_reply_fifo_is_replaced
 test_dead_listener_fails_fast
 test_long_prompt_is_truncated
 test_two_processes_resuming_one_session
+test_restarted_serve_resends_pending_requests
+test_restarted_serve_drops_dead_requests
 
 if [ "$failures" -eq 0 ]; then
   echo 'PASS: all askpass tests'

@@ -33,10 +33,27 @@ serve() {
 
   # One dir per Claude Code process: two processes resuming one session must not share it.
   dir="$base/$1-$PPID"
-  rm -rf "$dir"
-  mkdir "$dir" && mkfifo "$dir/req" || exit 1
+  # A restart (the mod reloading) keeps the dir: helpers still waiting have their FIFOs there.
+  if [ -d "$dir" ] && [ ! -L "$dir" ]; then
+    rm -f "$dir/req" "$dir/serve.pid"
+  else
+    rm -rf "$dir"
+    mkdir "$dir" || exit 1
+  fi
+  mkfifo "$dir/req" || exit 1
   printf '%s\n' "$$" > "$dir/serve.pid"
   printf 'ready\t%s\n' "$dir"
+
+  # Requests the previous listener read but nobody answered: resend the live ones.
+  for request in "$dir"/request.*; do
+    [ -f "$request" ] || continue
+    pid=${request##*.}
+    if kill -0 "$pid" 2> /dev/null; then
+      cat "$request"
+    else
+      rm -f "$request" "$dir/reply.$pid"
+    fi
+  done
 
   # Opened read-write so the loop never sees EOF; builtins only, so killing this
   # shell leaves no child behind.
@@ -57,8 +74,9 @@ ask() {
     exit 1
   fi
   reply="$CC_ASKPASS_DIR/reply.$$"
-  # A helper killed with SIGKILL leaves its FIFO behind for the next owner of its pid.
-  rm -f "$reply"
+  request="$CC_ASKPASS_DIR/request.$$"
+  # A helper killed with SIGKILL leaves its files behind for the next owner of its pid.
+  rm -f "$reply" "$request"
   mkfifo "$reply" || exit 1
   # Held open read-write before the request goes out, so a reply written early is kept.
   exec 4<> "$reply"
@@ -76,12 +94,15 @@ ask() {
     kill "$$" 2> /dev/null
   ) > /dev/null 2>&1 < /dev/null &
   watchdog=$!
-  trap 'rm -f "$reply"; kill "$watchdog" 2> /dev/null' EXIT
+  trap 'rm -f "$reply" "$request"; kill "$watchdog" 2> /dev/null' EXIT
   trap 'exit 1' INT TERM HUP
 
   # Cut well under PIPE_BUF so concurrent helpers' lines never interleave.
   prompt=$(printf '%s' "$1" | tr '\t\n' '  ' | cut -c 1-1000)
-  printf '%s\t%s\n' "$$" "$prompt" > "$CC_ASKPASS_DIR/req" || exit 1
+  # Kept as a file so a restarted listener can resend it; written to req read-write so a
+  # listener that died meanwhile cannot leave this blocked in open().
+  printf '%s\t%s\n' "$$" "$prompt" > "$request" || exit 1
+  printf '%s\t%s\n' "$$" "$prompt" 1<> "$CC_ASKPASS_DIR/req" || exit 1
 
   IFS= read -r pw <&4
   [ -n "$pw" ] || exit 1
