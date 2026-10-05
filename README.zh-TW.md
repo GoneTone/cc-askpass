@@ -88,6 +88,7 @@ claude plugin uninstall cc-askpass
 sh tests/askpass.sh                            # helper 測試（Linux/WSL）
 claude plugin validate . && claude plugin test .
 claude --plugin-dir .                          # 用這份原始碼啟動 Claude Code
+npx -p typescript tsc -p .                     # 型別檢查（先用 --plugin-dir 載入過一次）
 ```
 
 ## 授權
