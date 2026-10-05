@@ -109,6 +109,10 @@ function paneTitle(requester: Requester): string {
   return requester.isSudo ? 'sudo password' : `Password requested by ${requester.comm} (pid ${requester.pid})`
 }
 
+function paneHeading(requester: Requester): string {
+  return requester.isSudo ? 'sudo needs your password' : `${requester.comm} (pid ${requester.pid}) needs a password`
+}
+
 function clearWaiting($: EngineInterface): void {
   if (!isWaitingForOpen) return
   isWaitingForOpen = false
@@ -117,7 +121,15 @@ function clearWaiting($: EngineInterface): void {
 
 async function openPane($: EngineInterface): Promise<void> {
   if (current === null) return
-  const opened = await $.ui.open({ id: PANE, title: paneTitle(current.requester), focus: true, closeOnEscape: true })
+  const opened = await $.ui.open({
+    id: PANE,
+    title: paneTitle(current.requester),
+    focus: true,
+    closeOnEscape: true,
+    // Sizes the body wants: rows when inline above the prompt, columns when docked.
+    rows: 8,
+    columns: 60,
+  })
   if (opened.isPlaced) return clearWaiting($)
   // An open the person did not ask for waits on a narrow terminal. The band's button and
   // /askpass are opens they ask for, which are placed at any width.
@@ -332,42 +344,51 @@ export const register: Register = on => {
     // A fresh key per request: an Input keeps its old text when a key is reused.
     const key = `password-${request.helperPid}`
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" paddingX={1} rowGap={1}>
         {/* Focus is a request: with text in the composer or a dialog up, keys stay there. */}
         {!e.props.isFocused && (
           <Text color="red" bold>
             Click this pane (or press ctrl+x tab) before typing — your keys are going to the prompt below.
           </Text>
         )}
-        {request.isRetry && <Text color="red">Sorry, try again.</Text>}
-        <Text dimColor>Requested by: {request.requester.command}</Text>
-        <Text>{request.prompt}</Text>
-        <Input
-          key={key}
-          autoFocus
-          value={isMasked ? '•'.repeat(typed.length) : typed}
-          submitLabel="send"
-          onInput={value => {
-            typed = isMasked ? applyMaskedInput(typed, value) : value
-            $.ui.invalidate('ui.render')
-          }}
-          onSubmit={value => {
-            const password = isMasked ? applyMaskedInput(typed, value) : value
-            void submit($, request, password)
-          }}
-        />
-        <Button
-          key="toggle"
-          onPress={() => {
-            isMasked = !isMasked
-            $.ui.invalidate('ui.render')
-          }}
-        >
-          {isMasked ? 'Show' : 'Hide'}
-        </Button>
-        <Button key="cancel" role="dismiss" onPress={() => void submit($, request, '')}>
-          Cancel
-        </Button>
+        <Box flexDirection="column">
+          <Text bold>{paneHeading(request.requester)}</Text>
+          <Text dimColor wrap="truncate-end">
+            $ {request.requester.command}
+          </Text>
+        </Box>
+        <Box flexDirection="column">
+          {request.isRetry && <Text color="red">Sorry, try again.</Text>}
+          <Input
+            key={key}
+            label={request.prompt}
+            autoFocus
+            value={isMasked ? '•'.repeat(typed.length) : typed}
+            submitLabel="send"
+            onInput={value => {
+              typed = isMasked ? applyMaskedInput(typed, value) : value
+              $.ui.invalidate('ui.render')
+            }}
+            onSubmit={value => {
+              const password = isMasked ? applyMaskedInput(typed, value) : value
+              void submit($, request, password)
+            }}
+          />
+        </Box>
+        <Box flexDirection="row" columnGap={2}>
+          <Button
+            key="toggle"
+            onPress={() => {
+              isMasked = !isMasked
+              $.ui.invalidate('ui.render')
+            }}
+          >
+            {isMasked ? 'Show' : 'Hide'}
+          </Button>
+          <Button key="cancel" role="dismiss" onPress={() => void submit($, request, '')}>
+            Cancel
+          </Button>
+        </Box>
       </Box>
     )
   })

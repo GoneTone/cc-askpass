@@ -94,8 +94,9 @@ for (const surface of SURFACES) {
     await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
     expect(w.rec.opens.at(-1)).toEqual({ id: 'askpass', title: 'sudo password', focus: true, closeOnEscape: true })
     const ui = await w.mount(surface)
+    expect(await ui.find({ text: /sudo needs your password/ })).toBeDefined()
     expect(await ui.find({ text: /sudo apt update/ })).toBeDefined()
-    expect(await ui.find({ text: /\[sudo\] password for alice/ })).toBeDefined()
+    expect((await ui.find({ key: 'password-4242' }))?.props.label).toBe(SUDO_PROMPT)
   })
 
   test(`reply stdin is password plus newline (${surface})`, async ($, on) => {
