@@ -339,6 +339,16 @@ test('a failing ps check toasts and answers empty', async ($, on) => {
   expect(w.replies().map(reply => reply.stdin)).toEqual(['\n'])
 })
 
+test('a failing pane open keeps the request for /askpass', async ($, on) => {
+  const w = await world($, on)
+  w.rec.breakOpen()
+  await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+  // The checks passed: the helper must not be answered, and the toast must not blame them.
+  expect(w.replies()).toEqual([])
+  expect(w.rec.toasts.filter(text => text.includes('could not check'))).toEqual([])
+  expect(await (await w.mount('terminal')).find({ text: /sudo needs your password/ })).toBeDefined()
+})
+
 test('rejects askpass run straight from a shell', async ($, on) => {
   const w = await world($, on)
   await w.request(7000, 6900, SUDO_PROMPT, 'alice bash bash -c x')
@@ -455,7 +465,6 @@ test('narrow terminal shows a band button instead of the pane', async ($, on) =>
   // The hint gets a line of its own so it does not wrap around the button.
   const row = findBox(await band.drawn(), box => hasChild(box, 'Button', 'open-askpass'))
   expect(row !== undefined && hasChild(row, 'Text')).toBe(false)
-  expect(w.rec.statuses).toEqual([])
   expect(w.rec.toasts).toEqual([])
 })
 
@@ -542,7 +551,7 @@ test('password never leaks', async ($, on) => {
   await typeMasked(ui, await passwordKey(ui), PASSWORD)
   await ui.input({ key: await passwordKey(ui), text: '•'.repeat(PASSWORD.length) })
   await w.clock.settle()
-  const shown = [...w.rec.toasts, ...w.rec.statuses, ...w.rec.logs].join('\n')
+  const shown = [...w.rec.toasts, ...w.rec.logs].join('\n')
   expect(shown.includes(PASSWORD.trim())).toBe(false)
   expect(w.rec.runs.some(run => run.argv.some(arg => arg.includes(PASSWORD.trim())))).toBe(false)
 })

@@ -50,13 +50,13 @@ export type RunCall = { argv: readonly string[]; stdin?: string }
 export function recorder(on: On, answer: (argv: readonly string[]) => Partial<ProcessRunResult> | undefined = () => undefined) {
   const envSets: { name: string; value?: string }[] = []
   const toasts: string[] = []
-  const statuses: (string | undefined)[] = []
   const logs: string[] = []
   const runs: RunCall[] = []
   const commands: { name: string; immediate?: true }[] = []
   const opens: { id: string; title?: string; focus?: boolean; closeOnEscape?: boolean; rows?: number; columns?: number }[] = []
   const closes: string[] = []
   let placeOpens = true
+  let isOpenBroken = false
 
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.end', () => ({ sessionId: SESSION_ID }))
@@ -71,10 +71,6 @@ export function recorder(on: On, answer: (argv: readonly string[]) => Partial<Pr
   })
   on('ui.toast', (_$, e) => {
     toasts.push(e.text)
-    return { value: undefined }
-  })
-  on('ui.status', (_$, e) => {
-    statuses.push(e.text)
     return { value: undefined }
   })
   on('ui.log', (_$, e) => {
@@ -92,6 +88,7 @@ export function recorder(on: On, answer: (argv: readonly string[]) => Partial<Pr
     }
   })
   on('ui.open', (_$, e) => {
+    if (isOpenBroken) throw new Error('ui.open refused')
     opens.push({ id: e.id, title: e.title, focus: e.focus, closeOnEscape: e.closeOnEscape, rows: e.rows, columns: e.columns })
     return { value: placeOpens ? { isPlaced: true as const } : { isPlaced: false as const, reason: 'narrow' } }
   })
@@ -103,7 +100,6 @@ export function recorder(on: On, answer: (argv: readonly string[]) => Partial<Pr
   return {
     envSets,
     toasts,
-    statuses,
     logs,
     runs,
     commands,
@@ -112,6 +108,10 @@ export function recorder(on: On, answer: (argv: readonly string[]) => Partial<Pr
     /** Makes later `ui.open` calls answer as an unasked open on a narrow terminal. */
     setPlaced(isPlaced: boolean) {
       placeOpens = isPlaced
+    },
+    /** Makes later `ui.open` calls throw, as an engine refusal does. */
+    breakOpen() {
+      isOpenBroken = true
     },
     envValue(name: string) {
       return envSets.filter(set => set.name === name).at(-1)?.value

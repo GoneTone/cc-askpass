@@ -88,8 +88,11 @@ function log($: EngineInterface, text: string): void {
   void $.ui.log(`cc-askpass: ${text}`, { to: 'debug' })
 }
 
+// Requests are checked one at a time, so the queue keeps the order they arrived in.
+let checking: Promise<void> = Promise.resolve()
+
 function onRequestLine($: EngineInterface, line: string): void {
-  void verify($, line).catch(error => {
+  checking = checking.then(() => verify($, line)).catch(error => {
     // ps missing (a slim container) or failing: say so, and let the helper fail now.
     $.ui.toast(`cc-askpass: could not check an askpass request: ${String(error)}`)
     log($, `request failed: ${String(error)}`)
@@ -129,7 +132,8 @@ async function verify($: EngineInterface, line: string): Promise<void> {
   request.claudeCommand = await findClaudeCommand($, requester)
   request.isRetry = requester.isSudo && answered.has(requester.pid, await $.clock.now())
   queue.push(request)
-  await showNext($)
+  // The checks are done: a pane that fails to open leaves the request for /askpass.
+  void showNext($).catch(error => log($, `could not show the request: ${String(error)}`))
 }
 
 /** The Bash command Claude ran that led to `requester`, if it differs from its own line. */
@@ -209,7 +213,6 @@ async function openPane($: EngineInterface): Promise<void> {
     rows: paneRows(current),
     columns: PANE_WIDTH,
   })
-  log($, `ui.open: ${JSON.stringify(opened)}`)
   if (opened.isPlaced) return clearWaiting($)
   // An open the person did not ask for waits on a narrow terminal. The band's button and
   // /askpass are opens they ask for, which are placed at any width.
