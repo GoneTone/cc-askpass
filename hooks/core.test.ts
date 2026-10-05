@@ -100,9 +100,11 @@ test('parseParentPs recognises a root sudo', () => {
   expect(parseParentPs('', 4100)).toBe(null)
 })
 
-test('parseParentPs truncates long commands', () => {
-  const command = parseParentPs(`root sudo sudo ${'x'.repeat(300)}`, 1)?.command ?? ''
-  expect(command.length).toBe(201)
+test('parseParentPs keeps the whole command up to a safety cap', () => {
+  const long = `sudo ${'x'.repeat(1500)}`
+  expect(parseParentPs(`root sudo ${long}`, 1)?.command).toBe(long)
+  const command = parseParentPs(`root sudo sudo ${'x'.repeat(3000)}`, 1)?.command ?? ''
+  expect(command.length).toBe(2001)
   expect(command.endsWith('…')).toBe(true)
 })
 

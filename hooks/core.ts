@@ -1,7 +1,8 @@
 // Pure logic for the askpass mod: nothing here touches `$`.
 
 const ANSWERED_TTL_MS = 10 * 60 * 1000
-const MAX_COMMAND_LENGTH = 200
+// Whole command lines are shown; this only stops a pathological argv from flooding the pane.
+const MAX_COMMAND_LENGTH = 2000
 
 export type Requester = { pid: number; isSudo: boolean; comm: string; command: string }
 

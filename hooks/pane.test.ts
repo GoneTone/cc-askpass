@@ -30,7 +30,7 @@ async function world($: any, on: any) {
   const rec = recorder(on, argv => {
     if (argv[0] === 'ps' && isPsMissing) throw new Error('ps: command not found')
     if (argv[0] === 'ps') {
-      const out = ps.get(`${argv[2] === 'ppid=,args=' ? 'helper' : 'parent'}:${argv[argv.length - 1]}`)
+      const out = ps.get(`${argv.includes('ppid=,args=') ? 'helper' : 'parent'}:${argv[argv.length - 1]}`)
       return out === undefined ? { exitCode: 1 } : { stdout: `${out}\n` }
     }
     // The shell's own kill: /bin/kill may be missing.
@@ -175,6 +175,14 @@ for (const surface of ['mobile'] as const) {
     expect(await ui.find({ text: /Answer this prompt in the terminal or the desktop app/ })).toBeDefined()
   })
 }
+
+test('asks ps for whole command lines', async ($, on) => {
+  const w = await world($, on)
+  await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+  const psCalls = w.rec.runs.filter(run => run.argv[0] === 'ps')
+  expect(psCalls.length).toBeGreaterThan(0)
+  for (const call of psCalls) expect(call.argv).toContain('-ww')
+})
 
 test('forged request is rejected', async ($, on) => {
   const w = await world($, on)

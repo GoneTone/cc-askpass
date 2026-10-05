@@ -73,7 +73,7 @@ async function verify($: EngineInterface, line: string): Promise<void> {
   const parsed = parseRequest(line)
   if (parsed === null) return log($, `ignored malformed request line: ${line}`)
 
-  const helperPs = await $.process.run(['ps', '-o', 'ppid=,args=', '-p', String(parsed.helperPid)])
+  const helperPs = await $.process.run(['ps', '-ww', '-o', 'ppid=,args=', '-p', String(parsed.helperPid)])
   const helper = parseHelperPs(helperPs.stdout)
   if (helper === null) return
   if (!isOurHelper(helper.args, askpassPath)) {
@@ -81,7 +81,7 @@ async function verify($: EngineInterface, line: string): Promise<void> {
     return log($, `rejected forged request from pid ${parsed.helperPid}: ${helper.args}`)
   }
 
-  const parentPs = await $.process.run(['ps', '-o', 'user=,comm=,args=', '-p', String(helper.ppid)])
+  const parentPs = await $.process.run(['ps', '-ww', '-o', 'user=,comm=,args=', '-p', String(helper.ppid)])
   const requester = parseParentPs(parentPs.stdout, helper.ppid)
   if (requester === null) return
   const request: Request = { ...parsed, requester, isRetry: false }
@@ -354,7 +354,7 @@ export const register: Register = on => {
         )}
         <Box flexDirection="column">
           <Text bold>{paneHeading(request.requester)}</Text>
-          <Text dimColor wrap="truncate-end">
+          <Text dimColor wrap="wrap">
             $ {request.requester.command}
           </Text>
         </Box>
