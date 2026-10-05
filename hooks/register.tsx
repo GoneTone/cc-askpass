@@ -268,6 +268,8 @@ async function runServe($: EngineInterface): Promise<void> {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    // Under -p or the SDK nobody can answer a pane: leave sudo to fail at once as before.
+    if (!e.isInteractive) return started
     await $.command.register({
       name: 'askpass',
       description: 'Open the pending password prompt',
@@ -331,6 +333,12 @@ export const register: Register = on => {
     const key = `password-${request.helperPid}`
     return (
       <Box flexDirection="column">
+        {/* Focus is a request: with text in the composer or a dialog up, keys stay there. */}
+        {!e.props.isFocused && (
+          <Text color="red" bold>
+            Click this pane (or press ctrl+x tab) before typing — your keys are going to the prompt below.
+          </Text>
+        )}
         {request.isRetry && <Text color="red">Sorry, try again.</Text>}
         <Text dimColor>Requested by: {request.requester.command}</Text>
         <Text>{request.prompt}</Text>

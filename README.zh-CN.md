@@ -33,6 +33,7 @@ claude plugin install cc-askpass@cc-askpass
 - **Show/Hide** 可以显示你输入的内容。sudo 一律遮盖；其他提示也默认遮盖，只有 git 的 `Username for '...'` 和 ssh 首次连接的 `(yes/no)` 确认例外。
 - **Cancel** 或 Esc 表示不回答，sudo 会显示“no password was provided”并退出。
 - 密码输错时会再问一次，并提示“Sorry, try again”。
+- 如果面板出现时你正在输入框里打字（或有对话框打开），面板就拿不到键盘。这时它会用红字提示：先点一下面板（或按 ctrl+x tab）再输入，以免密码打进输入框、被当成消息发给 Claude。
 - 面板出现在哪里由 Claude Code 决定：全屏模式且宽度 110 列及以上时停靠在对话记录旁边，其他情况出现在提示栏上方。
 - 终端宽度不足 144 列时，面板可能不会自动弹出，此时提示栏上方会显示 `sudo is waiting for a password — type /askpass or click [Open password prompt]`。点击按钮或输入 `/askpass` 即可打开，Claude 运行中也能用。
 
@@ -70,7 +71,10 @@ Claude 的 Bash 命令 → sudo → bin/askpass → 请求 FIFO → cc-askpass m
 - 不处理 y/n 之类的提问，请使用 `-y`、`--no-interaction` 等参数。
 - 遮盖输入只跟踪在输入框末尾的输入和删除。如果移动了光标，请按 Show 确认，或清空后重新输入。
 - 在没有图形界面的主机上，`DISPLAY=:0` 这个占位值可能让少数图形程序（例如 `xdg-open`）尝试连接 X server 而失败。
-- 移动端 app 无法显示输入框，请改在终端或桌面版 app 回答。
+- 移动端 app（以及从手机使用 Remote Control）无法显示输入框，请改在终端或桌面版 app 回答。
+- 非交互模式（`claude -p`、SDK）下没有人能回答，mod 不会启动，sudo 会和没装 mod 时一样直接失败。
+- 开启 Bash 沙箱时，sudo 无法提权，helper 也看不到监听程序，会立即以“the cc-askpass listener is not running”失败。
+- mod 重新加载时（`/reload-plugins`，或开发时修改了它）正在等待的请求会丢失，那个命令会等到 Bash 超时才结束。
 - ssh 的确认提示（`SSH_ASKPASS_PROMPT=confirm`）会以普通文本输入的形式出现。
 - 在 macOS 上，ssh 和 git 的提示会被拒绝，因为确认调用者是真正 ssh/git 可执行文件的检查需要 Linux 的 `/proc`。sudo 可以正常使用。
 

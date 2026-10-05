@@ -17,6 +17,17 @@ test('session.start spawns serve with the session id', async ($, on) => {
   expect(argv.slice(1)).toEqual(['--serve', SESSION_ID])
 })
 
+test('does nothing without a person at the prompt (-p, SDK)', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, {})
+  const serve = fakeServe(on)
+  const rec = recorder(on)
+  await $.session.start({ ...START, isInteractive: false })
+  await clock.settle()
+  expect(serve.argvs).toEqual([])
+  expect(rec.envSets).toEqual([])
+})
+
 test('sets askpass env after ready', async ($, on) => {
   const clock = mock.clock(on)
   mock.env(on, {})

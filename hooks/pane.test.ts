@@ -110,6 +110,22 @@ for (const surface of SURFACES) {
     ])
   })
 
+  test(`warns when the pane does not hold the keyboard (${surface})`, async ($, on) => {
+    const w = await world($, on)
+    await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+    const unfocused = await $.ui.mount({
+      plugin: 'cc-askpass',
+      surface,
+      component: 'Pane',
+      props: { ...PANE_PROPS, isFocused: false },
+      requestId: 'askpass',
+    })
+    expect(await unfocused.find({ text: /your keys are going to the prompt below/ })).toBeDefined()
+    await unfocused.unmount()
+    const focused = await w.mount(surface)
+    expect(await focused.find({ text: /your keys are going to the prompt below/ })).toBeUndefined()
+  })
+
   test(`masks sudo input (${surface})`, async ($, on) => {
     const w = await world($, on)
     await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)

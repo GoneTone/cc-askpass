@@ -141,7 +141,8 @@ POSIX sh, no bashisms. Two modes.
 
 ### 4.3 Mod lifecycle
 
-- **`session.start`**: spawn `[<root>/bin/askpass, --serve, <session id>]`. If the first line
+- **`session.start`**: when `e.isInteractive` is false (`-p`, the SDK) do nothing: nobody could
+  answer, so sudo should fail at once as without the mod. Otherwise spawn `[<root>/bin/askpass, --serve, <session id>]`. If the first line
   is not `ready\t<dir>` within 5 s: toast the error, set nothing. Otherwise:
   - `$.env.set("CC_ASKPASS_DIR", dir)`
   - `$.env.set("SUDO_ASKPASS", askpassPath)`, `$.env.set("SSH_ASKPASS", askpassPath)`
@@ -194,6 +195,11 @@ Requests are queued in arrival order; the pane serves one at a time. When a requ
   older than 10 minutes pruned). A new request from an already-answered sudo pid means the
   previous password was wrong: show "Sorry, try again".
 - Open with `$.ui.open({ id: "askpass", title, focus: true, closeOnEscape: true })`.
+- `focus: true` is a request: with text in the composer, a dialog, or another site holding the
+  keys, the pane opens without the keyboard. While `isFocused` is false the pane's first line
+  says, in red, "Click this pane (or press ctrl+x tab) before typing — your keys are going to
+  the prompt below.", so a password is not typed into the composer and sent to Claude. The mod
+  does not re-grab focus later: it could land mid-way through a message being typed.
 - Placement is the surface's: docked beside a fullscreen transcript from 110 columns, else
   inline above the prompt. `ui.open` takes no placement option.
 - **Not placed** (`isPlaced: false`, narrow terminal): the `AbovePrompt` band shows

@@ -33,6 +33,7 @@ Ask Claude to run anything that needs sudo. A **sudo password** pane opens and s
 - **Show/Hide** reveals what you typed. Input is masked for sudo, and for every other prompt except git's `Username for '...'` and ssh's `(yes/no)` host-key question.
 - **Cancel** or Esc answers nothing; sudo stops with "no password was provided".
 - A wrong password asks again with "Sorry, try again".
+- If you were typing in the prompt (or a dialog was open) when the pane appeared, the pane cannot take the keyboard. It then says in red: click it (or press ctrl+x tab) before typing, so your password does not end up in the prompt and get sent to Claude.
 - Claude Code decides where the pane goes: beside the transcript in fullscreen mode at 110 columns or more, otherwise above the prompt.
 - If the terminal is narrower than 144 columns the pane may not open on its own. A line above the prompt then says `sudo is waiting for a password — type /askpass or click [Open password prompt]`. Click the button or type `/askpass`; both work while Claude is busy.
 
@@ -70,7 +71,10 @@ When a session starts, the mod starts a small listener (`bin/askpass --serve`) a
 - Yes/no prompts are not handled. Use flags such as `-y` or `--no-interaction`.
 - Masked input only tracks typing and deleting at the end of the field. If you move the cursor, press Show to check, or clear the field and type again.
 - On hosts without a display, the `DISPLAY=:0` placeholder may make a few graphical programs (for example `xdg-open`) try to reach an X server and fail.
-- The mobile app cannot show an input field; answer from the terminal or the desktop app.
+- The mobile app (and Remote Control from a phone) cannot show an input field; answer from the terminal or the desktop app.
+- In non-interactive runs (`claude -p`, the SDK) the mod does nothing, since nobody could answer; sudo fails as it would without it.
+- With the Bash sandbox on, sudo cannot raise privileges and the helper cannot see the listener, so it fails at once with "the cc-askpass listener is not running".
+- A request pending while the mod reloads (`/reload-plugins`, or editing it during development) is lost; its command waits until the Bash timeout.
 - ssh confirmation prompts (`SSH_ASKPASS_PROMPT=confirm`) appear as a plain text prompt.
 - On macOS, ssh and git prompts are rejected because the check that the caller is a real ssh/git binary needs Linux's `/proc`. sudo works.
 
