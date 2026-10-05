@@ -91,6 +91,26 @@ async function world($: any, on: any) {
   }
 }
 
+type Drawn = { type?: string; key?: string; props?: Record<string, unknown>; children?: unknown[] }
+
+function findBox(node: unknown, match: (box: Drawn) => boolean): Drawn | undefined {
+  if (typeof node !== 'object' || node === null) return undefined
+  const drawn = node as Drawn
+  if (drawn.type === 'Box' && match(drawn)) return drawn
+  for (const child of drawn.children ?? []) {
+    const found = findBox(child, match)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+
+function hasChild(box: Drawn, type: string, key?: string): boolean {
+  return (box.children ?? []).some(child => {
+    const drawn = child as Drawn
+    return drawn?.type === type && (key === undefined || drawn.props?.key === key || drawn.key === key)
+  })
+}
+
 /** The password Input's key: per request and per module load, so read it off the drawing. */
 async function passwordKey(ui: any): Promise<string> {
   return (await ui.find({ type: 'Input' }))?.key ?? ''
@@ -111,7 +131,11 @@ for (const surface of SURFACES) {
     const ui = await w.mount(surface)
     expect(await ui.find({ text: /sudo needs your password/ })).toBeDefined()
     expect(await ui.find({ text: /sudo apt update/ })).toBeDefined()
-    expect((await ui.find({ key: await passwordKey(ui) }))?.props.label).toBe('[sudo] password for alice')
+    expect(await ui.find({ type: 'Text', text: /^\[sudo\] password for alice$/ })).toBeDefined()
+    expect((await ui.find({ type: 'Input' }))?.props.label).toBeUndefined()
+    // The field and its Show button share a row; Cancel sits on its own below.
+    const row = findBox(await ui.drawn(), box => box.props?.flexDirection === 'row' && hasChild(box, 'Input'))
+    expect(row !== undefined && hasChild(row, 'Button', 'toggle') && !hasChild(row, 'Button', 'cancel')).toBe(true)
     expect(await ui.find({ text: /\$ sudo apt update/ })).toBeDefined()
   })
 

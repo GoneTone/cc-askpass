@@ -190,8 +190,9 @@ Requests are queued in arrival order; the pane serves one at a time. When a requ
 
 - Title: sudo request → "sudo password"; other → "Password requested by `<comm>` (pid N)".
 - Shows a heading ("sudo needs your password" / "<comm> (pid N) needs a password"), the
-  parent's whole command line as `$ <args>` (`ps -ww`, wrapped, capped at 2000 chars), and the
-  prompt as the Input's label (its trailing colon dropped: the Input draws its own).
+  parent's whole command line as `$ <args>` (`ps -ww`, wrapped, capped at 2000 chars), the
+  prompt on its own line (trailing colon dropped), then the Input with the Show/Hide Button
+  beside it, and Cancel on the line below.
 - "Claude ran: <command>": the mod records Claude's last 50 Bash commands (`tool.call`), walks
   `ps -e` up from the requester to the shell whose parent is Claude Code (pid from the session
   dir name), and shows the recorded command found in that shell's args (quotes `'"'"'` undone,

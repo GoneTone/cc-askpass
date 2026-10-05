@@ -406,32 +406,34 @@ export const register: Register = on => {
         </Box>
         <Box flexDirection="column">
           {request.isRetry && <Text color="red">Sorry, try again.</Text>}
-          <Input
-            key={key}
-            label={promptLabel(request.prompt)}
-            autoFocus
-            value={isMasked ? '•'.repeat(typed.length) : typed}
-            submitLabel="send"
-            onInput={value => {
-              typed = isMasked ? applyMaskedInput(typed, value) : value
-              $.ui.invalidate('ui.render')
-            }}
-            onSubmit={value => {
-              const password = isMasked ? applyMaskedInput(typed, value) : value
-              void submit($, request, password)
-            }}
-          />
+          <Text wrap="wrap">{promptLabel(request.prompt)}</Text>
+          <Box flexDirection="row" columnGap={2}>
+            <Input
+              key={key}
+              autoFocus
+              value={isMasked ? '•'.repeat(typed.length) : typed}
+              submitLabel="send"
+              onInput={value => {
+                typed = isMasked ? applyMaskedInput(typed, value) : value
+                $.ui.invalidate('ui.render')
+              }}
+              onSubmit={value => {
+                const password = isMasked ? applyMaskedInput(typed, value) : value
+                void submit($, request, password)
+              }}
+            />
+            <Button
+              key="toggle"
+              onPress={() => {
+                isMasked = !isMasked
+                $.ui.invalidate('ui.render')
+              }}
+            >
+              {isMasked ? 'Show' : 'Hide'}
+            </Button>
+          </Box>
         </Box>
-        <Box flexDirection="row" columnGap={2}>
-          <Button
-            key="toggle"
-            onPress={() => {
-              isMasked = !isMasked
-              $.ui.invalidate('ui.render')
-            }}
-          >
-            {isMasked ? 'Show' : 'Hide'}
-          </Button>
+        <Box>
           <Button key="cancel" role="dismiss" onPress={() => void submit($, request, '')}>
             Cancel
           </Button>

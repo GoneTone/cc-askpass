@@ -52,7 +52,7 @@ export function parseParentPs(out: string, pid: number): Requester | null {
   return { pid, isSudo: user === 'root' && comm === 'sudo', comm, command }
 }
 
-/** A prompt as an Input label: the Input draws its own colon after the label. */
+/** A prompt for the line above the field, its trailing colon (and blanks) dropped. */
 export function promptLabel(prompt: string): string {
   return prompt.replace(/\s*[:：]?\s*$/, '')
 }
