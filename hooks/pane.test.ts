@@ -240,17 +240,68 @@ test('closes pane when helper dies', async ($, on) => {
   expect(w.replies()).toEqual([])
 })
 
-test('narrow terminal falls back to /askpass', async ($, on) => {
+const WAITING = 'sudo is waiting for a password — type /askpass or click'
+const BAND_PROPS = {
+  hasSurvey: false,
+  isWorking: true,
+  maxRows: 10,
+  bodyColumns: 80,
+  scroll: { offset: 0, bodyRows: 10 },
+  view: {},
+} as const
+
+function mountBand($: any, hasSurvey = false) {
+  return $.ui.mount({ plugin: 'cc-askpass', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND_PROPS, hasSurvey } })
+}
+
+test('narrow terminal shows a band button instead of the pane', async ($, on) => {
   const w = await world($, on)
   w.rec.setPlaced(false)
   await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
-  expect(w.rec.statuses.at(-1)).toBe('sudo is waiting for a password — type /askpass')
-  expect(w.rec.toasts).toHaveLength(1)
+  const band = await mountBand($)
+  expect((await band.find({ type: 'Text', text: /sudo is waiting for a password/ }))?.text).toContain(WAITING)
+  expect((await band.find({ key: 'open-askpass' }))?.props.label).toBe('Open password prompt')
+  expect(w.rec.statuses).toEqual([])
+  expect(w.rec.toasts).toEqual([])
+})
+
+test('band button opens the pane and goes away', async ($, on) => {
+  const w = await world($, on)
+  w.rec.setPlaced(false)
+  await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+  const band = await mountBand($)
+  w.rec.setPlaced(true)
+  const opensBefore = w.rec.opens.length
+  await band.press({ key: 'open-askpass' })
+  expect(w.rec.opens.length).toBe(opensBefore + 1)
+  expect(await band.find({ key: 'open-askpass' })).toBeUndefined()
+})
+
+test('/askpass still opens the pane from a narrow terminal', async ($, on) => {
+  const w = await world($, on)
+  w.rec.setPlaced(false)
+  await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
   w.rec.setPlaced(true)
   const opensBefore = w.rec.opens.length
   await $.command.run({ command: 'askpass', args: '' } as never)
   expect(w.rec.opens.length).toBe(opensBefore + 1)
-  expect(w.rec.statuses).toEqual(['sudo is waiting for a password — type /askpass', undefined])
+  expect(await (await mountBand($)).find({ key: 'open-askpass' })).toBeUndefined()
+})
+
+test('band hint goes away when the request ends', async ($, on) => {
+  const w = await world($, on)
+  w.rec.setPlaced(false)
+  await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+  w.alive.delete(4242)
+  await w.clock.advance(2000)
+  expect(await (await mountBand($)).find({ key: 'open-askpass' })).toBeUndefined()
+})
+
+test('band yields to a survey', async ($, on) => {
+  const w = await world($, on)
+  w.rec.setPlaced(false)
+  await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+  expect(await (await mountBand($, true)).find({ key: 'open-askpass' })).toBeUndefined()
 })
 
 test('/askpass with nothing pending', async ($, on) => {

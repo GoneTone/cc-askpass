@@ -33,7 +33,8 @@ claude plugin install cc-askpass@cc-askpass
 - **Show/Hide** 可以显示你输入的内容。sudo 一律遮盖；其他提示也默认遮盖，只有 git 的 `Username for '...'` 和 ssh 首次连接的 `(yes/no)` 确认例外。
 - **Cancel** 或 Esc 表示不回答，sudo 会显示“no password was provided”并退出。
 - 密码输错时会再问一次，并提示“Sorry, try again”。
-- 终端宽度不足 144 列时，面板可能不会自动弹出，此时状态栏会显示 `sudo is waiting for a password — type /askpass`。输入 `/askpass` 即可打开，Claude 运行中也能用。
+- 面板出现在哪里由 Claude Code 决定：全屏模式且宽度 110 列及以上时停靠在对话记录旁边，其他情况出现在提示栏上方。
+- 终端宽度不足 144 列时，面板可能不会自动弹出，此时提示栏上方会显示 `sudo is waiting for a password — type /askpass or click [Open password prompt]`。点击按钮或输入 `/askpass` 即可打开，Claude 运行中也能用。
 
 ## 一段时间内只问一次
 

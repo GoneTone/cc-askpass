@@ -182,10 +182,16 @@ Requests are queued in arrival order; the pane serves one at a time. When a requ
   older than 10 minutes pruned). A new request from an already-answered sudo pid means the
   previous password was wrong: show "Sorry, try again".
 - Open with `$.ui.open({ id: "askpass", title, focus: true, closeOnEscape: true })`.
-- **Not placed** (`isPlaced: false`, narrow terminal): `$.ui.status("sudo is waiting for a
-  password — type /askpass")` and a toast. `/askpass` opens the pane as a user-asked open,
-  which is placed at any width. The status line is cleared when the pane opens or the
-  request ends. `/askpass` with nothing pending toasts "No pending password request".
+- Placement is the surface's: docked beside a fullscreen transcript from 110 columns, else
+  inline above the prompt. `ui.open` takes no placement option.
+- **Not placed** (`isPlaced: false`, narrow terminal): the `AbovePrompt` band shows
+  "`<comm>` is waiting for a password — type /askpass or click [Open password prompt]".
+  The Button (key `open-askpass`) and `/askpass` are user-asked opens, placed at any width.
+  The band clears when the pane opens or the request ends, and yields to a survey.
+  Verified: a mouse click presses the Button mid-turn; a bare digit hotkey does not (it is
+  typed into the composer), and the band cannot take the keyboard by itself
+  (`$.ui.focus` → "that site does not hold the keyboard"). `/askpass` with nothing pending
+  toasts "No pending password request".
 - Submit → reply with the password, record the sudo pid, close/advance.
 - Esc, the close mark, or the Cancel button → reply an empty line (the helper exits 1), advance.
 - The Input key is `password-<helper pid>`: an Input keeps its previous text when a pane

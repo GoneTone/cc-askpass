@@ -48,7 +48,8 @@ let current: Request | null = null
 let isAdvancing = false
 let typed = ''
 let isMasked = true
-let isStatusShown = false
+// True while the current request waits for the person to open its pane (narrow terminal).
+let isWaitingForOpen = false
 let aliveTimer: Timer | null = null
 const answered = new AnsweredPids()
 
@@ -101,21 +102,20 @@ function paneTitle(requester: Requester): string {
   return requester.isSudo ? 'sudo password' : `Password requested by ${requester.comm} (pid ${requester.pid})`
 }
 
-function clearStatus($: EngineInterface): void {
-  if (!isStatusShown) return
-  $.ui.status(undefined)
-  isStatusShown = false
+function clearWaiting($: EngineInterface): void {
+  if (!isWaitingForOpen) return
+  isWaitingForOpen = false
+  $.ui.invalidate('ui.render')
 }
 
 async function openPane($: EngineInterface): Promise<void> {
   if (current === null) return
   const opened = await $.ui.open({ id: PANE, title: paneTitle(current.requester), focus: true, closeOnEscape: true })
-  if (opened.isPlaced) return clearStatus($)
-  // An open the person did not ask for waits on a narrow terminal; /askpass is an asked open.
-  const text = `${current.requester.comm} is waiting for a password — type /askpass`
-  $.ui.status(text)
-  $.ui.toast(text)
-  isStatusShown = true
+  if (opened.isPlaced) return clearWaiting($)
+  // An open the person did not ask for waits on a narrow terminal. The band's button and
+  // /askpass are opens they ask for, which are placed at any width.
+  isWaitingForOpen = true
+  $.ui.invalidate('ui.render')
 }
 
 /** Shows the next queued request whose helper is still alive; one caller at a time. */
@@ -151,7 +151,7 @@ async function finish($: EngineInterface, request: Request): Promise<void> {
   aliveTimer = null
   current = null
   typed = ''
-  clearStatus($)
+  clearWaiting($)
   await $.ui.close({ id: PANE })
   await showNext($)
 }
@@ -285,6 +285,20 @@ export const register: Register = on => {
     const closed = await next(e)
     if (e.id === PANE && e.origin.kind === 'person' && request !== null) await submit($, request, '')
     return closed
+  })
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const request = current
+    if (!isWaitingForOpen || request === null || e.props.hasSurvey) return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    return (
+      <Box>
+        <Text>{request.requester.comm} is waiting for a password — type /askpass or click </Text>
+        <Button key="open-askpass" onPress={() => void openPane($)}>
+          Open password prompt
+        </Button>
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

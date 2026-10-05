@@ -60,6 +60,8 @@ export function recorder(on: On, answer: (argv: readonly string[]) => Partial<Pr
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.end', () => ({ sessionId: SESSION_ID }))
   on('session.id', () => ({ value: SESSION_ID }))
+  // The engine's own band when no plugin draws one: nothing.
+  on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Box', props: {}, children: [] }) as never)
   on('env.set', (_$, e) => {
     envSets.push({ name: e.name, value: e.value })
     return { value: undefined }
