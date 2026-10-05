@@ -367,15 +367,21 @@ export const register: Register = on => {
     const request = current
     if (!isWaitingForOpen || request === null || e.props.hasSurvey) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
-    const howToOpen = isMainScreen(e) ? 'type /askpass, or press ctrl+x tab then Enter' : 'type /askpass or click'
+    const howToOpen = isMainScreen(e)
+      ? 'press ctrl+x tab then Enter, or type /askpass'
+      : 'click the button below or type /askpass'
+    // The hint has a line of its own: beside the button it wraps mid-sentence.
     return (
-      <Box>
+      <Box flexDirection="column">
         <Text>
-          {request.requester.comm} is waiting for a password — {howToOpen}{' '}
+          {request.requester.comm} is waiting for a password — {howToOpen}
         </Text>
-        <Button key="open-askpass" onPress={() => void openPane($)}>
-          Open password prompt
-        </Button>
+        <Box>
+          {/* ctrl+x tab hands the band the keys; the ring starts here so Enter presses it. */}
+          <Button key="open-askpass" variant="primary" autoFocus onPress={() => void openPane($)}>
+            Open password prompt
+          </Button>
+        </Box>
       </Box>
     )
   })

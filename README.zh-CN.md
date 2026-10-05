@@ -35,7 +35,7 @@ claude plugin install cc-askpass@cc-askpass
 - 密码输错时会再问一次，并提示“Sorry, try again”。
 - 如果面板出现时你正在输入框里打字（或有对话框打开），面板就拿不到键盘。这时它会用红字提示：先点一下面板（或按 ctrl+x tab；非全屏模式只能用按键）再输入，以免密码打进输入框、被当成消息发给 Claude。
 - 面板出现在哪里由 Claude Code 决定：全屏模式且宽度 110 列及以上时停靠在对话记录旁边，其他情况出现在提示栏上方。
-- 终端宽度不足 144 列时，面板可能不会自动弹出，此时提示栏上方会显示 `sudo is waiting for a password — type /askpass or click [Open password prompt]`。点击按钮或输入 `/askpass` 即可打开，Claude 运行中也能用。非全屏模式下终端不支持鼠标点击，这行提示会改为请你输入 `/askpass`，或按 ctrl+x tab 再按 Enter。
+- 终端宽度不足 144 列时，面板可能不会自动弹出，此时提示栏上方会显示 `sudo is waiting for a password — click the button below or type /askpass`，下方有一个 **Open password prompt** 按钮。点击按钮或输入 `/askpass` 即可打开，Claude 运行中也能用。非全屏模式下终端不支持鼠标点击，这行提示会改为请你按 ctrl+x tab（键盘会移到按钮上）再按 Enter，或输入 `/askpass`。
 
 ## 一段时间内只问一次
 

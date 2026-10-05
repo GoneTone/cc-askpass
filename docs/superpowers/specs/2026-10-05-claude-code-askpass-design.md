@@ -209,11 +209,12 @@ Requests are queued in arrival order; the pane serves one at a time. When a requ
 - Placement is the surface's: docked beside a fullscreen transcript from 110 columns, else
   inline above the prompt. `ui.open` takes no placement option.
 - **Not placed** (`isPlaced: false`, narrow terminal): the `AbovePrompt` band shows
-  "`<comm>` is waiting for a password — type /askpass or click [Open password prompt]".
+  "`<comm>` is waiting for a password — click the button below or type /askpass" on one line
+  and an `Open password prompt` Button (`autoFocus`, so ctrl+x tab then Enter presses it) below.
   The Button (key `open-askpass`) and `/askpass` are user-asked opens, placed at any width.
   The band clears when the pane opens or the request ends, and yields to a survey.
   On the terminal's main screen (`viewport.isFullscreen === false`) clicks are not reported, so
-  the band says "type /askpass, or press ctrl+x tab then Enter" and the focus warning says
+  the band says "press ctrl+x tab then Enter, or type /askpass" and the focus warning says
   "Press ctrl+x tab before typing"; elsewhere they mention clicking.
   Verified: a mouse click presses the Button mid-turn; a bare digit hotkey does not (it is
   typed into the composer), and the band cannot take the keyboard by itself

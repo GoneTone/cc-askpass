@@ -359,7 +359,7 @@ test('closes pane when helper dies', async ($, on) => {
   expect(w.replies()).toEqual([])
 })
 
-const WAITING = 'sudo is waiting for a password — type /askpass or click'
+const WAITING = 'sudo is waiting for a password — click the button below or type /askpass'
 const BAND_PROPS = {
   hasSurvey: false,
   isWorking: true,
@@ -388,7 +388,13 @@ test('narrow terminal shows a band button instead of the pane', async ($, on) =>
   await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
   const band = await mountBand($)
   expect((await band.find({ type: 'Text', text: /sudo is waiting for a password/ }))?.text).toContain(WAITING)
-  expect((await band.find({ key: 'open-askpass' }))?.props.label).toBe('Open password prompt')
+  const button = await band.find({ key: 'open-askpass' })
+  expect(button?.props.label).toBe('Open password prompt')
+  // ctrl+x tab hands the band the keys; the ring must start on the button for Enter to press it.
+  expect(button?.props.autoFocus).toBe(true)
+  // The hint gets a line of its own so it does not wrap around the button.
+  const row = findBox(await band.drawn(), box => hasChild(box, 'Button', 'open-askpass'))
+  expect(row !== undefined && hasChild(row, 'Text')).toBe(false)
   expect(w.rec.statuses).toEqual([])
   expect(w.rec.toasts).toEqual([])
 })
@@ -398,7 +404,7 @@ test('band hint on the main screen points at keys, not clicks', async ($, on) =>
   w.rec.setPlaced(false)
   await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
   const text = (await (await mountBand($, false, MAIN_SCREEN)).find({ type: 'Text', text: /waiting for a password/ }))?.text ?? ''
-  expect(text).toContain('type /askpass, or press ctrl+x tab then Enter')
+  expect(text).toContain('sudo is waiting for a password — press ctrl+x tab then Enter, or type /askpass')
   expect(text).not.toContain('click')
 })
 
