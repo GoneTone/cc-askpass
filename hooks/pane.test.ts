@@ -195,10 +195,7 @@ test('narrow terminal falls back to /askpass', async ($, on) => {
   const opensBefore = w.rec.opens.length
   await $.command.run({ command: 'askpass', args: '' } as never)
   expect(w.rec.opens.length).toBe(opensBefore + 1)
-  const ui = await w.mount('terminal')
-  await ui.input({ key: 'password-4242', text: 'x' })
-  await w.clock.settle()
-  expect(w.rec.statuses.at(-1)).toBe(undefined)
+  expect(w.rec.statuses).toEqual(['sudo is waiting for a password — type /askpass', undefined])
 })
 
 test('/askpass with nothing pending', async ($, on) => {

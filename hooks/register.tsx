@@ -77,10 +77,16 @@ function paneTitle(requester: Requester): string {
   return requester.isSudo ? 'sudo password' : `Password requested by ${requester.comm} (pid ${requester.pid})`
 }
 
+function clearStatus($: EngineInterface): void {
+  if (!isStatusShown) return
+  $.ui.status(undefined)
+  isStatusShown = false
+}
+
 async function openPane($: EngineInterface): Promise<void> {
   if (current === null) return
   const opened = await $.ui.open({ id: PANE, title: paneTitle(current.requester), focus: true, closeOnEscape: true })
-  if (opened.isPlaced) return
+  if (opened.isPlaced) return clearStatus($)
   // An open the person did not ask for waits on a narrow terminal; /askpass is an asked open.
   const text = `${current.requester.comm} is waiting for a password — type /askpass`
   $.ui.status(text)
@@ -110,10 +116,7 @@ async function finish($: EngineInterface): Promise<void> {
   aliveTimer = null
   current = null
   typed = ''
-  if (isStatusShown) {
-    $.ui.status(undefined)
-    isStatusShown = false
-  }
+  clearStatus($)
   await $.ui.close({ id: PANE })
   await showNext($)
 }
