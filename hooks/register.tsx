@@ -278,7 +278,10 @@ export const register: Register = on => {
   })
 
   on('session.end', async ($, e, next) => {
-    if (sessionDir !== '') await $.process.run(['rm', '-rf', sessionDir])
+    // After /clear or an in-process resume the process goes on under a new session id and
+    // no session.start follows, so the listener and the env pointing at its dir stay.
+    const isProcessEnding = e.reason !== 'clear' && e.reason !== 'resume'
+    if (isProcessEnding && sessionDir !== '') await $.process.run(['rm', '-rf', sessionDir])
     return next(e)
   })
 

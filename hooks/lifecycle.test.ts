@@ -162,9 +162,24 @@ test('session.end removes the session dir', async ($, on) => {
   await $.session.start(START)
   serve.emit(`ready\t${SESSION_DIR}\n`)
   await clock.settle()
-  await $.session.end({ reason: 'exit' } as never)
+  await $.session.end({ reason: 'prompt_input_exit' } as never)
   expect(rec.runs.map(run => run.argv)).toContainEqual(['rm', '-rf', SESSION_DIR])
 })
+
+for (const reason of ['clear', 'resume'] as const) {
+  test(`session.end for ${reason} keeps the listener and its dir`, async ($, on) => {
+    const clock = mock.clock(on)
+    mock.env(on, {})
+    const serve = fakeServe(on)
+    const rec = recorder(on)
+    await $.session.start(START)
+    serve.emit(`ready\t${SESSION_DIR}\n`)
+    await clock.settle()
+    // The process goes on and no session.start follows: the env still points at this dir.
+    await $.session.end({ reason } as never)
+    expect(rec.runs.some(run => run.argv[0] === 'rm')).toBe(false)
+  })
+}
 
 test('registers /askpass as immediate', async ($, on) => {
   const clock = mock.clock(on)

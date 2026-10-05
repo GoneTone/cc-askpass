@@ -154,7 +154,9 @@ POSIX sh, no bashisms. Two modes.
   only if we set it), toast "askpass listener stopped". No automatic restart.
 - **Hot reload**: the old serve is killed with the module; the new module's `session.start`
   recreates the session dir and re-sets the same variables.
-- **`session.end`**: remove the session dir.
+- **`session.end`**: remove the session dir when the process ends (`prompt_input_exit`, `logout`,
+  `other`). After `/clear` or an in-process resume the process goes on under a new session id
+  and no `session.start` fires, so the listener, its dir and the env stay as they are.
 
 ## 5. Request handling
 
