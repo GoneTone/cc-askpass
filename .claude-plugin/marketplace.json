@@ -1,0 +1,12 @@
+{
+  "name": "cc-askpass",
+  "owner": { "name": "GoneTone" },
+  "metadata": { "description": "In-app password prompts for sudo, ssh and git run by Claude Code" },
+  "plugins": [
+    {
+      "name": "cc-askpass",
+      "source": "./",
+      "description": "Answer sudo/ssh askpass prompts from Claude's Bash commands with an in-app password pane"
+    }
+  ]
+}
