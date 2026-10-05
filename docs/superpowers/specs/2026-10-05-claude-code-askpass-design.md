@@ -211,8 +211,9 @@ Requests are queued in arrival order; the pane serves one at a time. When a requ
 - **Not placed** (`isPlaced: false`, narrow terminal): the `AbovePrompt` band shows
   "`<comm>` is waiting for a password — click the button below or type /askpass" on one line
   and an `Open password prompt` Button (`autoFocus`, so ctrl+x tab then Enter presses it) below.
-  Pressing it clears the band, waits 150 ms, then opens the pane: while the band holds the
-  keyboard the pane's `focus` request is refused (verified: opened after the band let go, the
+  Pressing it clears the band, waits 150 ms, then opens the pane, all inside the press (the
+  handler returns that promise; an open after the press is over counts as unasked and waits
+  unplaced, seen in the debug log): while the band holds the keyboard the pane's `focus` request is refused (verified: opened after the band let go, the
   pane reports `isFocused: true` and takes typing).
   The Button (key `open-askpass`) and `/askpass` are user-asked opens, placed at any width.
   The band clears when the pane opens or the request ends, and yields to a survey.
