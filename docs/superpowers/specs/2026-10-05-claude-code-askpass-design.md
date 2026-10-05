@@ -161,7 +161,8 @@ The mod never trusts what the request line says about its origin. For each line
    - `user` is `root` and the basename of `comm` is `sudo` → **sudo request** (macOS `ps`
      prints the full path in `comm`).
    - anything else → **other request**, labelled with the parent's `comm` and pid, accepted only
-     when `comm` is `ssh`, `ssh-add`, `scp`, `sftp`, `git` or `git-remote-http` and the parent's
+     when `comm` is `ssh`, `ssh-add`, `scp`, `sftp` or `git-remote-http` (not plain `git`:
+     `git credential fill` prints the answer to stdout) and the parent's
      `/proc/<pid>/exe` resolves to a root-owned file named like `comm`. Otherwise it is
      rejected with a toast and an empty reply: a shell running `$SUDO_ASKPASS` itself would
      read the answer from the helper's stdout. macOS has no `/proc`, so ssh/git are rejected there.

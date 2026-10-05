@@ -97,8 +97,10 @@ export class AnsweredPids {
 }
 
 // Programs other than sudo whose askpass answer goes back to them, not to the caller.
+// Plain `git` is left out: `git credential fill` prints the answer to stdout. git's HTTPS
+// prompts come from its remote helper.
 // `comm` is cut at 15 characters: git-remote-https reads as git-remote-http.
-const ASKPASS_CLIENTS = ['ssh', 'ssh-add', 'scp', 'sftp', 'git', 'git-remote-http']
+const ASKPASS_CLIENTS = ['ssh', 'ssh-add', 'scp', 'sftp', 'git-remote-http']
 
 export type ExeInfo = { uid: number; path: string }
 

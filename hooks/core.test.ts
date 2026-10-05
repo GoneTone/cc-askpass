@@ -67,6 +67,9 @@ test('isTrustedClient accepts root-owned ssh and git binaries only', () => {
   expect(isTrustedClient(ssh, null)).toBe(false)
   const remote = { pid: 1, isSudo: false, comm: 'git-remote-http', command: 'git-remote-https origin' }
   expect(isTrustedClient(remote, parseExeInfo('0 /usr/lib/git-core/git-remote-https\n'))).toBe(true)
+  // `git credential fill` prints what it is told to stdout, where Claude reads it.
+  const git = { pid: 1, isSudo: false, comm: 'git', command: 'git credential fill' }
+  expect(isTrustedClient(git, parseExeInfo('0 /usr/bin/git\n'))).toBe(false)
   const bash = { pid: 1, isSudo: false, comm: 'bash', command: 'bash -c x' }
   expect(isTrustedClient(bash, parseExeInfo('0 /usr/bin/bash\n'))).toBe(false)
 })

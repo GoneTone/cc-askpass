@@ -59,7 +59,7 @@ When a session starts, the mod starts a small listener (`bin/askpass --serve`) a
 ## Security
 
 - The password is never written to the model's context, logs, toasts, the status line, command-line arguments, or files.
-- Requests are accepted only from `bin/askpass` started by sudo running as root, or by root-owned `ssh`, `ssh-add`, `scp`, `sftp` or `git` binaries. Anything else, such as a command running `$SUDO_ASKPASS` itself to read your answer, is rejected.
+- Requests are accepted only from `bin/askpass` started by sudo running as root, or by root-owned `ssh`, `ssh-add`, `scp`, `sftp` or `git-remote-http(s)` (git's HTTPS helper) binaries. Anything else, such as a command running `$SUDO_ASKPASS` itself to read your answer, is rejected.
 - The pane shows the real command that asked. Check it before you answer: an `ssh` or `git` command sends your answer to the server it names.
 - Limitation: a malicious process running as your own user can race to read the reply to a genuine request. cc-askpass keeps the password out of the model's context in normal use; it is not a sandbox against hostile code running as you.
 

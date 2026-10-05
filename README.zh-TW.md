@@ -59,7 +59,7 @@ session 開始時，mod 會啟動一個小型監聽程式（`bin/askpass --serve
 ## 安全性
 
 - 密碼不會寫入模型的 context、log、toast、status line、指令參數或任何檔案。
-- 只接受由 root 身分的 sudo，或屬於 root 的 `ssh`、`ssh-add`、`scp`、`sftp`、`git` 執行檔所啟動的 `bin/askpass` 請求。其他來源一律拒絕，例如指令自己執行 `$SUDO_ASKPASS` 來讀取你的回答。
+- 只接受由 root 身分的 sudo，或屬於 root 的 `ssh`、`ssh-add`、`scp`、`sftp`、`git-remote-http(s)`（git 的 HTTPS 輔助程式）執行檔所啟動的 `bin/askpass` 請求。其他來源一律拒絕，例如指令自己執行 `$SUDO_ASKPASS` 來讀取你的回答。
 - 面板會顯示實際要求密碼的指令，回答前請先確認：`ssh` 或 `git` 指令會把你的回答送到它指定的伺服器。
 - 限制：以你自己的使用者身分執行的惡意程式，有機會在真正的請求進行時搶先讀走回覆。cc-askpass 的目標是正常使用下不讓密碼進入模型的 context，它不是防範同一使用者底下惡意程式的沙箱。
 

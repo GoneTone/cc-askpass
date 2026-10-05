@@ -123,8 +123,8 @@ for (const surface of SURFACES) {
 
   test(`git username is not masked (${surface})`, async ($, on) => {
     const w = await world($, on)
-    await w.request(5000, 4900, "Username for 'https://github.com': ", 'alice git git push')
-    expect(w.rec.opens.at(-1)?.title).toBe('Password requested by git (pid 4900)')
+    await w.request(5000, 4900, "Username for 'https://github.com': ", 'alice git-remote-http git-remote-https origin https://github.com/a/b')
+    expect(w.rec.opens.at(-1)?.title).toBe('Password requested by git-remote-http (pid 4900)')
     const ui = await w.mount(surface)
     await ui.input({ key: 'password-5000', text: 'alice', kind: 'change' })
     expect((await ui.find({ key: 'password-5000' }))?.props.value).toBe('alice')
