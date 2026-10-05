@@ -171,9 +171,31 @@ export function claudePidOf(sessionDir: string): number | null {
   return pid === undefined ? null : Number(pid)
 }
 
-/** A command for the pane: a long script shows its first lines. */
-export function commandPreview(command: string): string {
-  const lines = command.split('\n')
-  if (lines.length <= 5) return command
-  return `${lines.slice(0, 5).join('\n')}\n… (${lines.length - 5} more lines)`
+/** Rows `text` takes when wrapped at `width` characters (wide characters count as one). */
+export function wrappedLines(text: string, width: number): number {
+  return text.split('\n').reduce((rows, line) => rows + Math.max(1, Math.ceil(line.length / width)), 0)
+}
+
+/** `text` cut to fit `maxRows` rows at `width`, an ellipsis marking the cut. */
+export function clipLines(text: string, maxRows: number, width: number): string {
+  const kept: string[] = []
+  let rows = 0
+  for (const line of text.split('\n')) {
+    const need = wrappedLines(line, width)
+    if (rows + need <= maxRows) {
+      kept.push(line)
+      rows += need
+      continue
+    }
+    const room = maxRows - rows
+    if (room > 0) {
+      kept.push(`${line.slice(0, room * width - 1)}…`)
+    } else {
+      // The last kept line is full: put the ellipsis in place of its last character.
+      const last = kept.pop() ?? ''
+      kept.push(last.length > 0 && last.length % width === 0 ? `${last.slice(0, -1)}…` : `${last}…`)
+    }
+    return kept.join('\n')
+  }
+  return kept.join('\n')
 }

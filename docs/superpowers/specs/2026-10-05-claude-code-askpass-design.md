@@ -196,7 +196,11 @@ Requests are queued in arrival order; the pane serves one at a time. When a requ
 - "Claude ran: <command>": the mod records Claude's last 50 Bash commands (`tool.call`), walks
   `ps -e` up from the requester to the shell whose parent is Claude Code (pid from the session
   dir name), and shows the recorded command found in that shell's args (quotes `'"'"'` undone,
-  longest match). Shown only when it differs from the `$` line; first 5 lines of a script.
+  longest match). Shown only when it differs from the `$` line.
+- The `$` and "Claude ran" lines are each clipped to 3 rows (measured at 60 columns, an
+  ellipsis at the cut). `ui.open` asks for `rows` computed from the content (focus warning
+  always counted, since focus is only known when drawn) and `columns: 60`, so the field is
+  never pushed out of an inline pane; Claude Code still caps rows at the space it can spare.
 - Retry hint: the mod remembers which sudo pids it has answered (`Map<pid, time>`, entries
   older than 10 minutes pruned). A new request from an already-answered sudo pid means the
   previous password was wrong: show "Sorry, try again".

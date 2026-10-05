@@ -5,7 +5,7 @@ import {
   applyMaskedInput,
   bashShellArgs,
   claudePidOf,
-  commandPreview,
+  clipLines,
   matchBashCommand,
   parsePsTable,
   isOurHelper,
@@ -16,6 +16,7 @@ import {
   parseReady,
   parseRequest,
   promptLabel,
+  wrappedLines,
   shouldMask,
   splitLines,
 } from './core'
@@ -183,7 +184,16 @@ test('claudePidOf reads the pid the session dir is named after', () => {
   expect(claudePidOf('')).toBe(null)
 })
 
-test('commandPreview keeps the first five lines', () => {
-  expect(commandPreview('a\nb')).toBe('a\nb')
-  expect(commandPreview('1\n2\n3\n4\n5\n6\n7')).toBe('1\n2\n3\n4\n5\n… (2 more lines)')
+test('wrappedLines counts the rows text takes at a width', () => {
+  expect(wrappedLines('', 10)).toBe(1)
+  expect(wrappedLines('abc', 10)).toBe(1)
+  expect(wrappedLines('x'.repeat(25), 10)).toBe(3)
+  expect(wrappedLines('ab\n' + 'x'.repeat(11), 10)).toBe(3)
+})
+
+test('clipLines keeps text within a number of rows', () => {
+  expect(clipLines('short', 3, 10)).toBe('short')
+  expect(clipLines('x'.repeat(40), 3, 10)).toBe(`${'x'.repeat(29)}…`)
+  expect(clipLines('1\n2\n3\n4\n5', 3, 10)).toBe('1\n2\n3…')
+  expect(wrappedLines(clipLines(`a\n${'y'.repeat(50)}\nb`, 3, 10), 10)).toBe(3)
 })

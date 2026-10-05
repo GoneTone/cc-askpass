@@ -6,7 +6,7 @@ import {
   applyMaskedInput,
   bashShellArgs,
   claudePidOf,
-  commandPreview,
+  clipLines,
   matchBashCommand,
   parsePsTable,
   isOurHelper,
@@ -17,6 +17,7 @@ import {
   parseReady,
   parseRequest,
   promptLabel,
+  wrappedLines,
   shouldMask,
   splitLines,
 } from './core'
@@ -27,6 +28,10 @@ const ALIVE_POLL_MS = 2000
 // Time for the band to drop its button and hand the keyboard back (verified at 150 ms).
 const BAND_RELEASE_MS = 150
 const PANE = 'askpass'
+// Width the pane asks for when docked, and the width its content is measured at.
+const PANE_WIDTH = 60
+// Rows the `$` and "Claude ran" lines may take: a long command must not push the field away.
+const MAX_SECTION_ROWS = 3
 // Writes only into a FIFO: the first test skips a vanished helper, the second catches
 // the FIFO being removed between that test and the open (`<>` would create a file).
 // Read-write so the open never blocks.
@@ -148,6 +153,32 @@ function isMainScreen(e: { viewport?: { isFullscreen?: boolean } }): boolean {
   return e.viewport?.isFullscreen === false
 }
 
+function focusWarning(isMain: boolean): string {
+  const how = isMain ? 'Press ctrl+x tab' : 'Click this pane (or press ctrl+x tab)'
+  return `${how} before typing — your keys are going to the prompt below.`
+}
+
+function claudeLine(request: Request): string | null {
+  if (request.claudeCommand === null) return null
+  return clipLines(`Claude ran: ${request.claudeCommand}`, MAX_SECTION_ROWS, PANE_WIDTH)
+}
+
+function commandLine(request: Request): string {
+  return clipLines(`$ ${request.requester.command}`, MAX_SECTION_ROWS, PANE_WIDTH)
+}
+
+/**
+ * Rows the pane body needs, measured at PANE_WIDTH (an inline pane is usually wider, so this
+ * errs tall). The focus warning is counted always: whether it shows is known only when drawn.
+ */
+function paneRows(request: Request): number {
+  const claude = claudeLine(request)
+  const header = 1 + (claude === null ? 0 : wrappedLines(claude, PANE_WIDTH)) + wrappedLines(commandLine(request), PANE_WIDTH)
+  const field = (request.isRetry ? 1 : 0) + wrappedLines(promptLabel(request.prompt), PANE_WIDTH) + 1
+  const gaps = 3
+  return wrappedLines(focusWarning(false), PANE_WIDTH) + header + field + 1 + gaps
+}
+
 function paneHeading(requester: Requester): string {
   return requester.isSudo ? 'sudo needs your password' : `${requester.comm} (pid ${requester.pid}) needs a password`
 }
@@ -166,8 +197,8 @@ async function openPane($: EngineInterface): Promise<void> {
     focus: true,
     closeOnEscape: true,
     // Sizes the body wants: rows when inline above the prompt, columns when docked.
-    rows: 8,
-    columns: 60,
+    rows: paneRows(current),
+    columns: PANE_WIDTH,
   })
   log($, `ui.open: ${JSON.stringify(opened)}`)
   if (opened.isPlaced) return clearWaiting($)
@@ -419,19 +450,18 @@ export const register: Register = on => {
         {/* Focus is a request: with text in the composer or a dialog up, keys stay there. */}
         {!e.props.isFocused && (
           <Text color="red" bold>
-            {isMainScreen(e) ? 'Press ctrl+x tab' : 'Click this pane (or press ctrl+x tab)'} before typing — your keys
-            are going to the prompt below.
+            {focusWarning(isMainScreen(e))}
           </Text>
         )}
         <Box flexDirection="column">
           <Text bold>{paneHeading(request.requester)}</Text>
           {request.claudeCommand !== null && (
             <Text dimColor wrap="wrap">
-              Claude ran: {commandPreview(request.claudeCommand)}
+              {claudeLine(request)}
             </Text>
           )}
           <Text dimColor wrap="wrap">
-            $ {request.requester.command}
+            {commandLine(request)}
           </Text>
         </Box>
         <Box flexDirection="column">

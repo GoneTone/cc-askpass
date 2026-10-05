@@ -127,7 +127,15 @@ for (const surface of SURFACES) {
   test(`sudo request opens titled pane (${surface})`, async ($, on) => {
     const w = await world($, on)
     await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
-    expect(w.rec.opens.at(-1)).toEqual({ id: 'askpass', title: 'sudo password', focus: true, closeOnEscape: true })
+    // rows: warning 2 + heading 1 + `$` 1 + prompt 1 + field 1 + Cancel 1 + 3 gaps.
+    expect(w.rec.opens.at(-1)).toEqual({
+      id: 'askpass',
+      title: 'sudo password',
+      focus: true,
+      closeOnEscape: true,
+      rows: 10,
+      columns: 60,
+    })
     const ui = await w.mount(surface)
     expect(await ui.find({ text: /sudo needs your password/ })).toBeDefined()
     expect(await ui.find({ text: /sudo apt update/ })).toBeDefined()
@@ -243,6 +251,23 @@ test('skips the Claude line when no Bash call matches', async ($, on) => {
   await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
   const ui = await w.mount('terminal')
   expect(await ui.find({ text: /Claude ran:/ })).toBeUndefined()
+})
+
+test('clips a long sudo command to three rows', async ($, on) => {
+  const w = await world($, on)
+  await w.request(4242, 4100, SUDO_PROMPT, `root sudo sudo cp ${'x'.repeat(400)} /opt`)
+  const ui = await w.mount('terminal')
+  const line = (await ui.find({ type: 'Text', text: /^\$ sudo cp/ }))?.text ?? ''
+  expect(line.endsWith('…')).toBe(true)
+  expect(line.length).toBeLessThanOrEqual(180)
+})
+
+test('asks for the rows its content needs', async ($, on) => {
+  const w = await world($, on)
+  await w.bashCall('sudo -k && ./install.sh', 4100)
+  await w.request(4242, 4100, SUDO_PROMPT, `root sudo sudo cp ${'x'.repeat(400)} /opt`)
+  // 10 for a plain request, plus the Claude line (1) and two more rows of the clipped `$` line.
+  expect(w.rec.opens.at(-1)?.rows).toBe(13)
 })
 
 test('asks ps for whole command lines', async ($, on) => {

@@ -54,7 +54,7 @@ export function recorder(on: On, answer: (argv: readonly string[]) => Partial<Pr
   const logs: string[] = []
   const runs: RunCall[] = []
   const commands: { name: string; immediate?: true }[] = []
-  const opens: { id: string; title?: string; focus?: boolean; closeOnEscape?: boolean }[] = []
+  const opens: { id: string; title?: string; focus?: boolean; closeOnEscape?: boolean; rows?: number; columns?: number }[] = []
   const closes: string[] = []
   let placeOpens = true
 
@@ -90,7 +90,7 @@ export function recorder(on: On, answer: (argv: readonly string[]) => Partial<Pr
     }
   })
   on('ui.open', (_$, e) => {
-    opens.push({ id: e.id, title: e.title, focus: e.focus, closeOnEscape: e.closeOnEscape })
+    opens.push({ id: e.id, title: e.title, focus: e.focus, closeOnEscape: e.closeOnEscape, rows: e.rows, columns: e.columns })
     return { value: placeOpens ? { isPlaced: true as const } : { isPlaced: false as const, reason: 'narrow' } }
   })
   on('ui.close', (_$, e) => {
