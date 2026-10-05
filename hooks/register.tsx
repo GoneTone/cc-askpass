@@ -4,6 +4,11 @@ import type { Requester } from './core'
 import {
   AnsweredPids,
   applyMaskedInput,
+  bashShellArgs,
+  claudePidOf,
+  commandPreview,
+  matchBashCommand,
+  parsePsTable,
   isOurHelper,
   isTrustedClient,
   parseExeInfo,
@@ -32,6 +37,8 @@ type Request = {
   prompt: string
   requester: Requester
   isRetry: boolean
+  // The Bash tool command that led to this request, when it says more than the sudo line.
+  claudeCommand: string | null
   // Set before the first await of an answer, so Enter, Esc and the alive poll answer once.
   isAnswered?: boolean
 }
@@ -53,6 +60,10 @@ let isMasked = true
 let isWaitingForOpen = false
 let aliveTimer: Timer | null = null
 const answered = new AnsweredPids()
+// Claude's latest Bash commands, to name the one a request comes from. Background commands
+// outlive their tool call, so these are kept by count, not by call.
+const recentBashCommands: string[] = []
+const RECENT_BASH_LIMIT = 50
 
 function log($: EngineInterface, text: string): void {
   void $.ui.log(`cc-askpass: ${text}`, { to: 'debug' })
@@ -84,7 +95,7 @@ async function verify($: EngineInterface, line: string): Promise<void> {
   const parentPs = await $.process.run(['ps', '-ww', '-o', 'user=,comm=,args=', '-p', String(helper.ppid)])
   const requester = parseParentPs(parentPs.stdout, helper.ppid)
   if (requester === null) return
-  const request: Request = { ...parsed, requester, isRetry: false }
+  const request: Request = { ...parsed, requester, isRetry: false, claudeCommand: null }
 
   if (!requester.isSudo) {
     const exe = await $.process.run(['sh', '-c', EXE_SCRIPT, '_', String(requester.pid)])
@@ -96,9 +107,26 @@ async function verify($: EngineInterface, line: string): Promise<void> {
     }
   }
 
+  request.claudeCommand = await findClaudeCommand($, requester)
   request.isRetry = requester.isSudo && answered.has(requester.pid, await $.clock.now())
   queue.push(request)
   await showNext($)
+}
+
+/** The Bash command Claude ran that led to `requester`, if it differs from its own line. */
+async function findClaudeCommand($: EngineInterface, requester: Requester): Promise<string | null> {
+  const claudePid = claudePidOf(sessionDir)
+  if (claudePid === null || recentBashCommands.length === 0) return null
+  try {
+    const ps = await $.process.run(['ps', '-e', '-ww', '-o', 'pid=,ppid=,args='])
+    const shell = bashShellArgs(parsePsTable(ps.stdout), requester.pid, claudePid)
+    const command = shell === null ? null : matchBashCommand(shell, recentBashCommands)
+    return command === null || command.trim() === requester.command.trim() ? null : command
+  } catch (error) {
+    // Only context for the pane: a failure here must not block the request.
+    log($, `could not find the Bash command: ${String(error)}`)
+    return null
+  }
 }
 
 async function isAlive($: EngineInterface, pid: number): Promise<boolean> {
@@ -292,6 +320,14 @@ export const register: Register = on => {
     return started
   })
 
+  on('tool.call', { tool: 'Bash' }, ($, e, next) => {
+    if (e.tool === 'Bash') {
+      recentBashCommands.push(e.command)
+      if (recentBashCommands.length > RECENT_BASH_LIMIT) recentBashCommands.shift()
+    }
+    return next(e)
+  })
+
   on('session.end', async ($, e, next) => {
     // After /clear or an in-process resume the process goes on under a new session id and
     // no session.start follows, so the listener and the env pointing at its dir stay.
@@ -354,6 +390,11 @@ export const register: Register = on => {
         )}
         <Box flexDirection="column">
           <Text bold>{paneHeading(request.requester)}</Text>
+          {request.claudeCommand !== null && (
+            <Text dimColor wrap="wrap">
+              Claude ran: {commandPreview(request.claudeCommand)}
+            </Text>
+          )}
           <Text dimColor wrap="wrap">
             $ {request.requester.command}
           </Text>

@@ -3,6 +3,11 @@ import { expect, test } from 'claude-code/testing'
 import {
   AnsweredPids,
   applyMaskedInput,
+  bashShellArgs,
+  claudePidOf,
+  commandPreview,
+  matchBashCommand,
+  parsePsTable,
   isOurHelper,
   isTrustedClient,
   parseExeInfo,
@@ -140,4 +145,45 @@ test('AnsweredPids forgets pids after 10 minutes', () => {
   expect(answered.has(7, 599_999)).toBe(true)
   expect(answered.has(7, 600_001)).toBe(false)
   expect(answered.has(8, 0)).toBe(false)
+})
+
+const TABLE = parsePsTable(
+  [
+    '  4242  4100 /bin/sh /opt/p/bin/askpass [sudo] password: ',
+    '  4100   950 sudo true',
+    `   950   900 /bin/bash -c source /x 2>/dev/null || true && eval 'sudo -k && sudo true' < /dev/null`,
+    '   900     1 claude',
+    '   700   700 loop',
+  ].join('\n'),
+)
+
+test('parsePsTable reads pid, ppid and args', () => {
+  expect(TABLE.get(4100)).toEqual({ ppid: 950, args: 'sudo true' })
+  expect(TABLE.size).toBe(5)
+})
+
+test('bashShellArgs finds the ancestor Claude started', () => {
+  expect(bashShellArgs(TABLE, 4100, 900)).toContain(`eval 'sudo -k && sudo true'`)
+  expect(bashShellArgs(TABLE, 4100, 123)).toBe(null)
+  expect(bashShellArgs(TABLE, 700, 900)).toBe(null)
+  expect(bashShellArgs(TABLE, 99999, 900)).toBe(null)
+})
+
+test('matchBashCommand undoes the shell quoting and prefers the longest match', () => {
+  const shell = `/bin/bash -c source /x && eval 'timeout 25 tail -f /dev/null; echo "it'"'"'s done"' < /dev/null`
+  expect(matchBashCommand(shell, ['ls', `timeout 25 tail -f /dev/null; echo "it's done"`])).toBe(
+    `timeout 25 tail -f /dev/null; echo "it's done"`,
+  )
+  expect(matchBashCommand(`eval 'sudo -k && sudo true'`, ['true', 'sudo -k && sudo true'])).toBe('sudo -k && sudo true')
+  expect(matchBashCommand(`eval 'make install'`, ['ls', 'pwd'])).toBe(null)
+})
+
+test('claudePidOf reads the pid the session dir is named after', () => {
+  expect(claudePidOf('/run/user/1000/cc-askpass/0d1c-26322')).toBe(26322)
+  expect(claudePidOf('')).toBe(null)
+})
+
+test('commandPreview keeps the first five lines', () => {
+  expect(commandPreview('a\nb')).toBe('a\nb')
+  expect(commandPreview('1\n2\n3\n4\n5\n6\n7')).toBe('1\n2\n3\n4\n5\n… (2 more lines)')
 })

@@ -28,7 +28,7 @@ claude plugin install cc-askpass@cc-askpass
 
 ## 使用方法
 
-让 Claude 执行任何需要 sudo 的命令，就会弹出 **sudo password** 面板，并显示是哪个命令在请求密码（例如 `sudo apt update`）。输入密码后按 Enter。
+让 Claude 执行任何需要 sudo 的命令，就会弹出 **sudo password** 面板，并完整显示将以 root 执行的命令（例如 `$ sudo apt update`）。如果 sudo 是由 Claude 执行的其他东西间接调用的，例如 `./install.sh` 或 `curl … | bash`，还会多一行 `Claude ran:` 显示那个命令。输入密码后按 Enter。
 
 - **Show/Hide** 可以显示你输入的内容。sudo 一律遮盖；其他提示也默认遮盖，只有 git 的 `Username for '...'` 和 ssh 首次连接的 `(yes/no)` 确认例外。
 - **Cancel** 或 Esc 表示不回答，sudo 会显示“no password was provided”并退出。

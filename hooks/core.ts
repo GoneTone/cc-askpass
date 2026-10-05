@@ -125,3 +125,55 @@ export function isTrustedClient(requester: Requester, exe: ExeInfo | null): bool
   if (exe === null || exe.uid !== 0 || !ASKPASS_CLIENTS.includes(requester.comm)) return false
   return (exe.path.split('/').at(-1) ?? '').startsWith(requester.comm)
 }
+
+export type PsTable = Map<number, { ppid: number; args: string }>
+
+/** Output of `ps -e -ww -o pid=,ppid=,args=`. */
+export function parsePsTable(out: string): PsTable {
+  const table: PsTable = new Map()
+  for (const line of out.split('\n')) {
+    const [, pid, ppid, args] = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line) ?? []
+    if (pid !== undefined && ppid !== undefined && args !== undefined) {
+      table.set(Number(pid), { ppid: Number(ppid), args })
+    }
+  }
+  return table
+}
+
+/** The args of `pid`'s ancestor that Claude Code started: the Bash tool's shell, if any. */
+export function bashShellArgs(table: PsTable, pid: number, claudePid: number): string | null {
+  const seen = new Set<number>()
+  for (let current = table.get(pid); current !== undefined; current = table.get(current.ppid)) {
+    if (current.ppid === claudePid) return current.args
+    if (seen.has(current.ppid)) return null
+    seen.add(current.ppid)
+  }
+  return null
+}
+
+/**
+ * Which of Claude's recent Bash commands that shell runs. The tool passes the command
+ * single-quoted, a quote inside written as '"'"'; the longest match wins, so `true`
+ * does not stand in for `sudo -k && sudo true`.
+ */
+export function matchBashCommand(shellArgs: string, recent: readonly string[]): string | null {
+  const unquoted = shellArgs.replaceAll(`'"'"'`, `'`)
+  let best: string | null = null
+  for (const command of recent) {
+    if (unquoted.includes(command) && command.length > (best?.length ?? 0)) best = command
+  }
+  return best
+}
+
+/** The Claude Code pid a session dir is named after (`<session id>-<pid>`). */
+export function claudePidOf(sessionDir: string): number | null {
+  const pid = /-(\d+)$/.exec(sessionDir)?.[1]
+  return pid === undefined ? null : Number(pid)
+}
+
+/** A command for the pane: a long script shows its first lines. */
+export function commandPreview(command: string): string {
+  const lines = command.split('\n')
+  if (lines.length <= 5) return command
+  return `${lines.slice(0, 5).join('\n')}\n… (${lines.length - 5} more lines)`
+}

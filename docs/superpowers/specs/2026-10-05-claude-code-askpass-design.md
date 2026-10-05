@@ -189,8 +189,13 @@ Requests are queued in arrival order; the pane serves one at a time. When a requ
 ### 5.3 Pane
 
 - Title: sudo request → "sudo password"; other → "Password requested by `<comm>` (pid N)".
-- Shows the parent's full command line (e.g. `sudo apt update`), truncated to 200 chars,
-  and the prompt text.
+- Shows a heading ("sudo needs your password" / "<comm> (pid N) needs a password"), the
+  parent's whole command line as `$ <args>` (`ps -ww`, wrapped, capped at 2000 chars), and the
+  prompt as the Input's label (its trailing colon dropped: the Input draws its own).
+- "Claude ran: <command>": the mod records Claude's last 50 Bash commands (`tool.call`), walks
+  `ps -e` up from the requester to the shell whose parent is Claude Code (pid from the session
+  dir name), and shows the recorded command found in that shell's args (quotes `'"'"'` undone,
+  longest match). Shown only when it differs from the `$` line; first 5 lines of a script.
 - Retry hint: the mod remembers which sudo pids it has answered (`Map<pid, time>`, entries
   older than 10 minutes pruned). A new request from an already-answered sudo pid means the
   previous password was wrong: show "Sorry, try again".

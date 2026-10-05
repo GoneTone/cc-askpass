@@ -26,9 +26,13 @@ async function world($: any, on: any) {
   const ps = new Map<string, string>()
   const exes = new Map<string, string>()
   const alive = new Set<number>()
+  // Stands in for the Bash tool itself, beneath the plugin's tool.call hook.
+  on('tool.call', () => ({ result: { stdout: '', stderr: '', interrupted: false }, text: '' }) as never)
   let isPsMissing = false
+  let psTable = ''
   const rec = recorder(on, argv => {
     if (argv[0] === 'ps' && isPsMissing) throw new Error('ps: command not found')
+    if (argv[0] === 'ps' && argv.includes('-e')) return { stdout: psTable }
     if (argv[0] === 'ps') {
       const out = ps.get(`${argv.includes('ppid=,args=') ? 'helper' : 'parent'}:${argv[argv.length - 1]}`)
       return out === undefined ? { exitCode: 1 } : { stdout: `${out}\n` }
@@ -52,6 +56,12 @@ async function world($: any, on: any) {
     alive,
     breakPs() {
       isPsMissing = true
+    },
+    /** Claude runs `command` with the Bash tool; sudo `sudoPid` runs inside that shell. */
+    async bashCall(command: string, sudoPid: number) {
+      await $.tool.call({ tool: 'Bash', command } as never)
+      const quoted = command.replaceAll(`'`, `'"'"'`)
+      psTable = [`${sudoPid} 950 sudo`, `950 900 /bin/bash -c source /x && eval '${quoted}' < /dev/null`, '900 1 claude'].join('\n')
     },
     /**
      * Sets up helper `helperPid`, child of `parentPid`, asking with `prompt`; `exe` is the
@@ -175,6 +185,29 @@ for (const surface of ['mobile'] as const) {
     expect(await ui.find({ text: /Answer this prompt in the terminal or the desktop app/ })).toBeDefined()
   })
 }
+
+test('shows the command Claude ran when it is not the sudo command itself', async ($, on) => {
+  const w = await world($, on)
+  await w.bashCall(`sudo -k && sudo apt update`, 4100)
+  await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+  const ui = await w.mount('terminal')
+  expect((await ui.find({ text: /Claude ran:/ }))?.text).toContain('sudo -k && sudo apt update')
+})
+
+test('skips the Claude line when Claude ran the sudo command directly', async ($, on) => {
+  const w = await world($, on)
+  await w.bashCall('sudo apt update', 4100)
+  await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+  const ui = await w.mount('terminal')
+  expect(await ui.find({ text: /Claude ran:/ })).toBeUndefined()
+})
+
+test('skips the Claude line when no Bash call matches', async ($, on) => {
+  const w = await world($, on)
+  await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+  const ui = await w.mount('terminal')
+  expect(await ui.find({ text: /Claude ran:/ })).toBeUndefined()
+})
 
 test('asks ps for whole command lines', async ($, on) => {
   const w = await world($, on)

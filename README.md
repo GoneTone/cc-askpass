@@ -28,7 +28,7 @@ Then restart Claude Code or run `/reload-plugins`. There is nothing to configure
 
 ## Usage
 
-Ask Claude to run anything that needs sudo. A **sudo password** pane opens and shows the command that asked (for example `sudo apt update`). Type the password and press Enter.
+Ask Claude to run anything that needs sudo. A **sudo password** pane opens and shows the whole command that will run as root (for example `$ sudo apt update`). When sudo was called from something else Claude ran, such as `./install.sh` or `curl … | bash`, a `Claude ran:` line shows that command too. Type the password and press Enter.
 
 - **Show/Hide** reveals what you typed. Input is masked for sudo, and for every other prompt except git's `Username for '...'` and ssh's `(yes/no)` host-key question.
 - **Cancel** or Esc answers nothing; sudo stops with "no password was provided".

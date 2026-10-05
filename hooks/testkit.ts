@@ -3,7 +3,8 @@
 import type { On, ProcessRunResult } from 'claude-code'
 
 export const SESSION_ID = 'S'
-export const SESSION_DIR = '/run/user/1000/cc-askpass/S'
+// Named <session id>-<Claude Code pid>; the pid (900) roots the process trees tests build.
+export const SESSION_DIR = '/run/user/1000/cc-askpass/S-900'
 
 /** Stands in for `bin/askpass --serve`: the test pushes its output and ends it. */
 export function fakeServe(on: On) {
