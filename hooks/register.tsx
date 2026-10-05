@@ -60,6 +60,9 @@ let isMasked = true
 let isWaitingForOpen = false
 let aliveTimer: Timer | null = null
 const answered = new AnsweredPids()
+// New on every load of this module. A reload shows the same pending requests again, and an
+// Input keeps the text it held under its key while the new module knows none of it.
+const LOAD_ID = Math.random().toString(36).slice(2, 8)
 // Claude's latest Bash commands, to name the one a request comes from. Background commands
 // outlive their tool call, so these are kept by count, not by call.
 const recentBashCommands: string[] = []
@@ -177,6 +180,8 @@ async function showNext($: EngineInterface): Promise<void> {
       current = request
       typed = ''
       isMasked = shouldMask(request.requester.isSudo, request.prompt)
+      // A pane still open from before a reload is not drawn again by `ui.open`.
+      $.ui.invalidate('ui.render')
       aliveTimer = $.clock.every(ALIVE_POLL_MS, () => {
         void isAlive($, request.helperPid)
           .then(alive => (alive || request.isAnswered ? undefined : finish($, request)))
@@ -378,8 +383,8 @@ export const register: Register = on => {
     }
     const { Input } = elements
 
-    // A fresh key per request: an Input keeps its old text when a key is reused.
-    const key = `password-${request.helperPid}`
+    // A fresh key per request and per load: an Input keeps its old text when a key is reused.
+    const key = `password-${request.helperPid}-${LOAD_ID}`
     return (
       <Box flexDirection="column" paddingX={1} rowGap={1}>
         {/* Focus is a request: with text in the composer or a dialog up, keys stay there. */}

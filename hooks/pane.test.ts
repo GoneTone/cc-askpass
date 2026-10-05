@@ -91,6 +91,11 @@ async function world($: any, on: any) {
   }
 }
 
+/** The password Input's key: per request and per module load, so read it off the drawing. */
+async function passwordKey(ui: any): Promise<string> {
+  return (await ui.find({ type: 'Input' }))?.key ?? ''
+}
+
 /** Types `text` into a masked field one character at a time, as the field reports it. */
 async function typeMasked(ui: any, key: string, text: string) {
   for (let i = 0; i < text.length; i++) {
@@ -106,7 +111,7 @@ for (const surface of SURFACES) {
     const ui = await w.mount(surface)
     expect(await ui.find({ text: /sudo needs your password/ })).toBeDefined()
     expect(await ui.find({ text: /sudo apt update/ })).toBeDefined()
-    expect((await ui.find({ key: 'password-4242' }))?.props.label).toBe('[sudo] password for alice')
+    expect((await ui.find({ key: await passwordKey(ui) }))?.props.label).toBe('[sudo] password for alice')
     expect(await ui.find({ text: /\$ sudo apt update/ })).toBeDefined()
   })
 
@@ -114,8 +119,8 @@ for (const surface of SURFACES) {
     const w = await world($, on)
     await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
     const ui = await w.mount(surface)
-    await typeMasked(ui, 'password-4242', PASSWORD)
-    await ui.input({ key: 'password-4242', text: '•'.repeat(PASSWORD.length) })
+    await typeMasked(ui, await passwordKey(ui), PASSWORD)
+    await ui.input({ key: await passwordKey(ui), text: '•'.repeat(PASSWORD.length) })
     await w.clock.settle()
     expect(w.replies()).toEqual([
       { argv: ['sh', '-c', REPLY_SCRIPT, '_', `${SESSION_DIR}/reply.4242`], stdin: `${PASSWORD}\n` },
@@ -138,21 +143,28 @@ for (const surface of SURFACES) {
     expect(await focused.find({ text: /your keys are going to the prompt below/ })).toBeUndefined()
   })
 
+  test(`password Input key is per request and per module load (${surface})`, async ($, on) => {
+    const w = await world($, on)
+    await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+    // After a reload the same request comes back; an Input keeps old text under an old key.
+    expect(await passwordKey(await w.mount(surface))).toMatch(/^password-4242-\w+$/)
+  })
+
   test(`masks sudo input (${surface})`, async ($, on) => {
     const w = await world($, on)
     await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
     const ui = await w.mount(surface)
-    await typeMasked(ui, 'password-4242', 'abcx')
-    expect((await ui.find({ key: 'password-4242' }))?.props.value).toBe('••••')
+    await typeMasked(ui, await passwordKey(ui), 'abcx')
+    expect((await ui.find({ key: await passwordKey(ui) }))?.props.value).toBe('••••')
   })
 
   test(`toggle shows plain text (${surface})`, async ($, on) => {
     const w = await world($, on)
     await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
     const ui = await w.mount(surface)
-    await typeMasked(ui, 'password-4242', 'abc')
+    await typeMasked(ui, await passwordKey(ui), 'abc')
     await ui.press({ key: 'toggle' })
-    expect((await ui.find({ key: 'password-4242' }))?.props.value).toBe('abc')
+    expect((await ui.find({ key: await passwordKey(ui) }))?.props.value).toBe('abc')
   })
 
   test(`git username is not masked (${surface})`, async ($, on) => {
@@ -160,15 +172,15 @@ for (const surface of SURFACES) {
     await w.request(5000, 4900, "Username for 'https://github.com': ", 'alice git-remote-http git-remote-https origin https://github.com/a/b')
     expect(w.rec.opens.at(-1)?.title).toBe('Password requested by git-remote-http (pid 4900)')
     const ui = await w.mount(surface)
-    await ui.input({ key: 'password-5000', text: 'alice', kind: 'change' })
-    expect((await ui.find({ key: 'password-5000' }))?.props.value).toBe('alice')
+    await ui.input({ key: await passwordKey(ui), text: 'alice', kind: 'change' })
+    expect((await ui.find({ key: await passwordKey(ui) }))?.props.value).toBe('alice')
   })
 
   test(`retry shows sorry hint (${surface})`, async ($, on) => {
     const w = await world($, on)
     await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
     let ui = await w.mount(surface)
-    await ui.input({ key: 'password-4242', text: '•' })
+    await ui.input({ key: await passwordKey(ui), text: '•' })
     await w.clock.settle()
     await ui.unmount()
     await w.request(4243, 4100, SUDO_PROMPT, SUDO_PARENT)
@@ -217,6 +229,15 @@ test('asks ps for whole command lines', async ($, on) => {
   for (const call of psCalls) expect(call.argv).toContain('-ww')
 })
 
+test('a pane already open redraws when a request arrives', async ($, on) => {
+  const w = await world($, on)
+  // After a reload the pane survives; the resent request must reach its drawing.
+  const ui = await w.mount('terminal')
+  expect(await ui.find({ text: /No pending password request/ })).toBeDefined()
+  await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+  expect(await ui.find({ text: /sudo needs your password/ })).toBeDefined()
+})
+
 test('forged request is rejected', async ($, on) => {
   const w = await world($, on)
   await w.request(6666, 6000, SUDO_PROMPT, SUDO_PARENT, { helperArgs: '/bin/sh /tmp/evil.sh x' })
@@ -258,7 +279,7 @@ test('two requests in one chunk open one pane at a time', async ($, on) => {
   await w.clock.settle()
   expect(w.rec.opens).toHaveLength(1)
   const ui = await w.mount('terminal')
-  await ui.input({ key: 'password-4242', text: 'x' })
+  await ui.input({ key: await passwordKey(ui), text: 'x' })
   await w.clock.settle()
   expect(w.rec.opens.map(open => open.title)).toEqual(['sudo password', 'Password requested by ssh (pid 4900)'])
 })
@@ -267,7 +288,7 @@ test('enter then cancel sends one reply', async ($, on) => {
   const w = await world($, on)
   await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
   const ui = await w.mount('terminal')
-  await Promise.allSettled([ui.input({ key: 'password-4242', text: 'x' }), ui.press({ key: 'cancel' })])
+  await Promise.allSettled([ui.input({ key: await passwordKey(ui), text: 'x' }), ui.press({ key: 'cancel' })])
   await w.clock.settle()
   // Whichever lands first answers; the other must not send a second reply.
   expect(w.replies()).toHaveLength(1)
@@ -289,7 +310,7 @@ test('queue serves in order', async ($, on) => {
   await w.request(5000, 4900, 'Enter passphrase for key: ', 'alice ssh ssh -T git@github.com')
   expect(w.rec.opens).toHaveLength(1)
   const ui = await w.mount('terminal')
-  await ui.input({ key: 'password-4242', text: 'x' })
+  await ui.input({ key: await passwordKey(ui), text: 'x' })
   await w.clock.settle()
   expect(w.rec.opens.at(-1)?.title).toBe('Password requested by ssh (pid 4900)')
 })
@@ -300,7 +321,7 @@ test('skips a queued request whose helper is gone', async ($, on) => {
   await w.request(5000, 4900, 'Enter passphrase for key: ', 'alice ssh ssh -T git@github.com')
   w.alive.delete(5000)
   const ui = await w.mount('terminal')
-  await ui.input({ key: 'password-4242', text: 'x' })
+  await ui.input({ key: await passwordKey(ui), text: 'x' })
   await w.clock.settle()
   expect(w.rec.opens).toHaveLength(1)
 })
@@ -388,8 +409,8 @@ test('password never leaks', async ($, on) => {
   const w = await world($, on)
   await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
   const ui = await w.mount('terminal')
-  await typeMasked(ui, 'password-4242', PASSWORD)
-  await ui.input({ key: 'password-4242', text: '•'.repeat(PASSWORD.length) })
+  await typeMasked(ui, await passwordKey(ui), PASSWORD)
+  await ui.input({ key: await passwordKey(ui), text: '•'.repeat(PASSWORD.length) })
   await w.clock.settle()
   const shown = [...w.rec.toasts, ...w.rec.statuses, ...w.rec.logs].join('\n')
   expect(shown.includes(PASSWORD.trim())).toBe(false)

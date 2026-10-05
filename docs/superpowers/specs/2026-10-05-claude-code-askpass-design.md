@@ -217,8 +217,11 @@ Requests are queued in arrival order; the pane serves one at a time. When a requ
   toasts "No pending password request".
 - Submit → reply with the password, record the sudo pid, close/advance.
 - Esc, the close mark, or the Cancel button → reply an empty line (the helper exits 1), advance.
-- The Input key is `password-<helper pid>`: an Input keeps its previous text when a pane
-  reopens with the same key, ignoring `value`.
+- The Input key is `password-<helper pid>-<load id>` (the load id is random per module load):
+  an Input keeps its previous text under a reused key, ignoring `value`, and after a reload
+  the same request comes back while the new module knows none of that text.
+- Making a request current invalidates `ui.render`: a pane still open from before a reload is
+  not drawn again by `ui.open`.
 - On the mobile surface (no Input) the pane says "Answer this prompt in the terminal or the
   desktop app."
 - While the pane is open, check `sh -c 'kill -0 \"$1\"'` (the builtin; `/bin/kill` may be absent) every 2 s (`$.clock.every`); if the
