@@ -180,10 +180,12 @@ async function openPane($: EngineInterface): Promise<void> {
  * Opens the pane from the band's button. While the band holds the keyboard a pane's focus
  * request is refused, so the band is cleared first and the pane opens once it has let go.
  */
-async function openFromBand($: EngineInterface): Promise<void> {
+function openFromBand($: EngineInterface): void {
   clearWaiting($)
-  await $.clock.sleep(BAND_RELEASE_MS)
-  await openPane($)
+  // A timer, not `await sleep`: a wait inside the press is dropped once the press is over.
+  $.clock.after(BAND_RELEASE_MS, () => {
+    void openPane($).catch(error => log($, `opening the pane failed: ${String(error)}`))
+  })
 }
 
 /** Shows the next queued request whose helper is still alive; one caller at a time. */
@@ -390,7 +392,7 @@ export const register: Register = on => {
         </Text>
         <Box>
           {/* ctrl+x tab hands the band the keys; the ring starts here so Enter presses it. */}
-          <Button key="open-askpass" variant="primary" autoFocus onPress={() => void openFromBand($)}>
+          <Button key="open-askpass" variant="primary" autoFocus onPress={() => openFromBand($)}>
             Open password prompt
           </Button>
         </Box>
