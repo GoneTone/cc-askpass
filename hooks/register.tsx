@@ -7,7 +7,6 @@ import {
   bashShellArgs,
   claudePidOf,
   clipLines,
-  fitSections,
   matchBashCommand,
   parsePsTable,
   isOurHelper,
@@ -463,50 +462,28 @@ export const register: Register = on => {
 
     // A fresh key per request and per load: an Input keeps its old text when a key is reused.
     const key = `password-${request.helperPid}-${LOAD_ID}`
-    // The pane may get fewer rows than asked (a short terminal): show what fits, most
-    // needed first, so the field never drops out of sight.
-    const width = Math.max(20, e.props.bodyColumns - 2)
     const warning = e.props.isFocused ? null : focusWarning(isMainScreen(e))
     const claude = claudeLine(request)
-    const command = commandLine(request)
-    const prompt = promptLabel(request.prompt)
-    const shown = fitSections(
-      [
-        { id: 'field', rows: 1 },
-        { id: 'prompt', rows: (request.isRetry ? 1 : 0) + wrappedLines(prompt, width) },
-        { id: 'warning', rows: warning === null ? 0 : wrappedLines(warning, width) },
-        { id: 'command', rows: wrappedLines(command, width) },
-        { id: 'cancel', rows: 1 },
-        { id: 'claude', rows: claude === null ? 0 : wrappedLines(claude, width) },
-        { id: 'heading', rows: 1 },
-        { id: 'gapBeforeField', rows: 1 },
-        { id: 'gapBeforeCancel', rows: 1 },
-      ],
-      e.props.scroll.bodyRows,
-    )
-    const isShown = (id: string) => shown.has(id as never)
 
     return (
       <Box flexDirection="column" paddingX={1}>
-        {warning !== null && isShown('warning') && (
+        {warning !== null && (
           <Text color="red" bold>
             {warning}
           </Text>
         )}
-        {isShown('heading') && <Text bold>{paneHeading(request.requester)}</Text>}
-        {claude !== null && isShown('claude') && (
+        <Text bold>{paneHeading(request.requester)}</Text>
+        {claude !== null && (
           <Text dimColor wrap="wrap">
             {claude}
           </Text>
         )}
-        {isShown('command') && (
-          <Text dimColor wrap="wrap">
-            {command}
-          </Text>
-        )}
-        {isShown('gapBeforeField') && <Text> </Text>}
-        {request.isRetry && isShown('prompt') && <Text color="red">Sorry, try again.</Text>}
-        {isShown('prompt') && <Text wrap="wrap">{prompt}</Text>}
+        <Text dimColor wrap="wrap">
+          {commandLine(request)}
+        </Text>
+        <Text> </Text>
+        {request.isRetry && <Text color="red">Sorry, try again.</Text>}
+        <Text wrap="wrap">{promptLabel(request.prompt)}</Text>
         <Box flexDirection="row" columnGap={2}>
           <Input
             key={key}
@@ -532,14 +509,12 @@ export const register: Register = on => {
             {isMasked ? 'Show' : 'Hide'}
           </Button>
         </Box>
-        {isShown('gapBeforeCancel') && <Text> </Text>}
-        {isShown('cancel') && (
-          <Box>
-            <Button key="cancel" role="dismiss" onPress={() => void submit($, request, '')}>
-              Cancel
-            </Button>
-          </Box>
-        )}
+        <Text> </Text>
+        <Box>
+          <Button key="cancel" role="dismiss" onPress={() => void submit($, request, '')}>
+            Cancel
+          </Button>
+        </Box>
       </Box>
     )
   })

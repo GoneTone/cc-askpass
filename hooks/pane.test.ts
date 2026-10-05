@@ -253,11 +253,11 @@ test('skips the Claude line when no Bash call matches', async ($, on) => {
   expect(await ui.find({ text: /Claude ran:/ })).toBeUndefined()
 })
 
-test('a short pane keeps the field, the warning and the command', async ($, on) => {
+test('a short pane still shows every section', async ($, on) => {
   const w = await world($, on)
   await w.bashCall('sudo -k && sudo true', 4100)
   await w.request(4242, 4100, SUDO_PROMPT, 'root sudo sudo true')
-  // As seen on a 28-row terminal: six body rows, the keys still on the prompt.
+  // Six body rows, as on a 28-row terminal: nothing is hidden to fit.
   const ui = await $.ui.mount({
     plugin: 'cc-askpass',
     surface: 'terminal',
@@ -265,11 +265,11 @@ test('a short pane keeps the field, the warning and the command', async ($, on) 
     props: { ...PANE_PROPS, isFocused: false, bodyColumns: 96, scroll: { offset: 0, bodyRows: 6 } },
     requestId: 'askpass',
   })
-  expect(await ui.find({ type: 'Input' })).toBeDefined()
-  expect(await ui.find({ text: /^\[sudo\] password for alice$/ })).toBeDefined()
   expect(await ui.find({ text: /your keys are going to the prompt below/ })).toBeDefined()
-  expect(await ui.find({ text: /^\$ sudo true$/ })).toBeDefined()
-  expect(await ui.find({ text: /sudo needs your password/ })).toBeUndefined()
+  expect(await ui.find({ text: /sudo needs your password/ })).toBeDefined()
+  expect(await ui.find({ text: /Claude ran: sudo -k && sudo true/ })).toBeDefined()
+  expect(await ui.find({ type: 'Input' })).toBeDefined()
+  expect(await ui.find({ key: 'cancel' })).toBeDefined()
 })
 
 test('a tall pane shows everything', async ($, on) => {
