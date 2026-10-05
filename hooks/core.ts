@@ -199,3 +199,19 @@ export function clipLines(text: string, maxRows: number, width: number): string 
   }
   return kept.join('\n')
 }
+
+/**
+ * Which sections fit in `budget` rows, taken in the given (priority) order; one that does not
+ * fit is skipped and smaller ones after it may still fit. A budget of 0 or less is unknown:
+ * everything is kept.
+ */
+export function fitSections<T extends string>(sections: readonly { id: T; rows: number }[], budget: number): Set<T> {
+  const kept = new Set<T>()
+  let left = budget > 0 ? budget : Number.POSITIVE_INFINITY
+  for (const section of sections) {
+    if (section.rows > left) continue
+    kept.add(section.id)
+    left -= section.rows
+  }
+  return kept
+}

@@ -201,6 +201,10 @@ Requests are queued in arrival order; the pane serves one at a time. When a requ
   ellipsis at the cut). `ui.open` asks for `rows` computed from the content (focus warning
   always counted, since focus is only known when drawn) and `columns: 60`, so the field is
   never pushed out of an inline pane; Claude Code still caps rows at the space it can spare.
+- A short terminal still gives the pane fewer rows (about 6 on a 28-row terminal). The pane
+  reads its visible rows (`scroll.bodyRows`) and width when drawn and shows sections in this
+  priority while they fit: field (with Show), prompt (with the retry line), focus warning,
+  `$` line, Cancel, "Claude ran", heading, then the two blank lines.
 - Retry hint: the mod remembers which sudo pids it has answered (`Map<pid, time>`, entries
   older than 10 minutes pruned). A new request from an already-answered sudo pid means the
   previous password was wrong: show "Sorry, try again".

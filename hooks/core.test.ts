@@ -6,6 +6,7 @@ import {
   bashShellArgs,
   claudePidOf,
   clipLines,
+  fitSections,
   matchBashCommand,
   parsePsTable,
   isOurHelper,
@@ -189,6 +190,18 @@ test('wrappedLines counts the rows text takes at a width', () => {
   expect(wrappedLines('abc', 10)).toBe(1)
   expect(wrappedLines('x'.repeat(25), 10)).toBe(3)
   expect(wrappedLines('ab\n' + 'x'.repeat(11), 10)).toBe(3)
+})
+
+test('fitSections keeps sections in priority order while they fit', () => {
+  const sections = [
+    { id: 'field', rows: 1 },
+    { id: 'warning', rows: 2 },
+    { id: 'command', rows: 3 },
+    { id: 'cancel', rows: 1 },
+  ]
+  expect([...fitSections(sections, 4)]).toEqual(['field', 'warning', 'cancel'])
+  expect([...fitSections(sections, 100)]).toEqual(['field', 'warning', 'command', 'cancel'])
+  expect([...fitSections(sections, 0)]).toEqual(['field', 'warning', 'command', 'cancel'])
 })
 
 test('clipLines keeps text within a number of rows', () => {

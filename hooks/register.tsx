@@ -7,6 +7,7 @@ import {
   bashShellArgs,
   claudePidOf,
   clipLines,
+  fitSections,
   matchBashCommand,
   parsePsTable,
   isOurHelper,
@@ -175,8 +176,8 @@ function paneRows(request: Request): number {
   const claude = claudeLine(request)
   const header = 1 + (claude === null ? 0 : wrappedLines(claude, PANE_WIDTH)) + wrappedLines(commandLine(request), PANE_WIDTH)
   const field = (request.isRetry ? 1 : 0) + wrappedLines(promptLabel(request.prompt), PANE_WIDTH) + 1
-  const gaps = 3
-  return wrappedLines(focusWarning(false), PANE_WIDTH) + header + field + 1 + gaps
+  const blankLines = 2
+  return wrappedLines(focusWarning(false), PANE_WIDTH) + header + field + 1 + blankLines
 }
 
 function paneHeading(requester: Requester): string {
@@ -445,59 +446,83 @@ export const register: Register = on => {
 
     // A fresh key per request and per load: an Input keeps its old text when a key is reused.
     const key = `password-${request.helperPid}-${LOAD_ID}`
+    // The pane may get fewer rows than asked (a short terminal): show what fits, most
+    // needed first, so the field never drops out of sight.
+    const width = Math.max(20, e.props.bodyColumns - 2)
+    const warning = e.props.isFocused ? null : focusWarning(isMainScreen(e))
+    const claude = claudeLine(request)
+    const command = commandLine(request)
+    const prompt = promptLabel(request.prompt)
+    const shown = fitSections(
+      [
+        { id: 'field', rows: 1 },
+        { id: 'prompt', rows: (request.isRetry ? 1 : 0) + wrappedLines(prompt, width) },
+        { id: 'warning', rows: warning === null ? 0 : wrappedLines(warning, width) },
+        { id: 'command', rows: wrappedLines(command, width) },
+        { id: 'cancel', rows: 1 },
+        { id: 'claude', rows: claude === null ? 0 : wrappedLines(claude, width) },
+        { id: 'heading', rows: 1 },
+        { id: 'gapBeforeField', rows: 1 },
+        { id: 'gapBeforeCancel', rows: 1 },
+      ],
+      e.props.scroll.bodyRows,
+    )
+    const isShown = (id: string) => shown.has(id as never)
+
     return (
-      <Box flexDirection="column" paddingX={1} rowGap={1}>
-        {/* Focus is a request: with text in the composer or a dialog up, keys stay there. */}
-        {!e.props.isFocused && (
+      <Box flexDirection="column" paddingX={1}>
+        {warning !== null && isShown('warning') && (
           <Text color="red" bold>
-            {focusWarning(isMainScreen(e))}
+            {warning}
           </Text>
         )}
-        <Box flexDirection="column">
-          <Text bold>{paneHeading(request.requester)}</Text>
-          {request.claudeCommand !== null && (
-            <Text dimColor wrap="wrap">
-              {claudeLine(request)}
-            </Text>
-          )}
+        {isShown('heading') && <Text bold>{paneHeading(request.requester)}</Text>}
+        {claude !== null && isShown('claude') && (
           <Text dimColor wrap="wrap">
-            {commandLine(request)}
+            {claude}
           </Text>
-        </Box>
-        <Box flexDirection="column">
-          {request.isRetry && <Text color="red">Sorry, try again.</Text>}
-          <Text wrap="wrap">{promptLabel(request.prompt)}</Text>
-          <Box flexDirection="row" columnGap={2}>
-            <Input
-              key={key}
-              autoFocus
-              value={isMasked ? '•'.repeat(typed.length) : typed}
-              submitLabel="send"
-              onInput={value => {
-                typed = isMasked ? applyMaskedInput(typed, value) : value
-                $.ui.invalidate('ui.render')
-              }}
-              onSubmit={value => {
-                const password = isMasked ? applyMaskedInput(typed, value) : value
-                void submit($, request, password)
-              }}
-            />
-            <Button
-              key="toggle"
-              onPress={() => {
-                isMasked = !isMasked
-                $.ui.invalidate('ui.render')
-              }}
-            >
-              {isMasked ? 'Show' : 'Hide'}
-            </Button>
-          </Box>
-        </Box>
-        <Box>
-          <Button key="cancel" role="dismiss" onPress={() => void submit($, request, '')}>
-            Cancel
+        )}
+        {isShown('command') && (
+          <Text dimColor wrap="wrap">
+            {command}
+          </Text>
+        )}
+        {isShown('gapBeforeField') && <Text> </Text>}
+        {request.isRetry && isShown('prompt') && <Text color="red">Sorry, try again.</Text>}
+        {isShown('prompt') && <Text wrap="wrap">{prompt}</Text>}
+        <Box flexDirection="row" columnGap={2}>
+          <Input
+            key={key}
+            autoFocus
+            value={isMasked ? '•'.repeat(typed.length) : typed}
+            submitLabel="send"
+            onInput={value => {
+              typed = isMasked ? applyMaskedInput(typed, value) : value
+              $.ui.invalidate('ui.render')
+            }}
+            onSubmit={value => {
+              const password = isMasked ? applyMaskedInput(typed, value) : value
+              void submit($, request, password)
+            }}
+          />
+          <Button
+            key="toggle"
+            onPress={() => {
+              isMasked = !isMasked
+              $.ui.invalidate('ui.render')
+            }}
+          >
+            {isMasked ? 'Show' : 'Hide'}
           </Button>
         </Box>
+        {isShown('gapBeforeCancel') && <Text> </Text>}
+        {isShown('cancel') && (
+          <Box>
+            <Button key="cancel" role="dismiss" onPress={() => void submit($, request, '')}>
+              Cancel
+            </Button>
+          </Box>
+        )}
       </Box>
     )
   })
