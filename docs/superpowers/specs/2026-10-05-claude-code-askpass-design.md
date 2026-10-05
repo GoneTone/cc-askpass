@@ -155,6 +155,10 @@ POSIX sh, no bashisms. Two modes.
   only if we set it), toast "askpass listener stopped". No automatic restart.
 - **Hot reload**: the old serve is killed with the module; the new module's `session.start`
   recreates the session dir and re-sets the same variables.
+- **`prompt.compose`**: while the listener runs (ready, env set), append a `session`-scoped
+  section `cc-askpass:sudo` telling the model sudo can ask: run sudo normally, no `-n`/`-S`,
+  no piped password, do not ask the user to run it. Models otherwise reach for `sudo -n`,
+  which fails without calling askpass. Dropped when the listener stops.
 - **`session.end`**: remove the session dir when the process ends (`prompt_input_exit`, `logout`,
   `other`). After `/clear` or an in-process resume the process goes on under a new session id
   and no `session.start` fires, so the listener, its dir and the env stay as they are.

@@ -26,6 +26,13 @@ import {
 const READY_TIMEOUT_MS = 5000
 const REPLY_TIMEOUT_MS = 5000
 const ALIVE_POLL_MS = 2000
+// Models add `-n` to sudo to avoid prompts they expect to hang; while the listener runs,
+// the system prompt says sudo can ask instead.
+const SUDO_NOTE =
+  'sudo can ask the user for a password in this session: the cc-askpass plugin shows a password ' +
+  'prompt inside Claude Code whenever sudo (or ssh/git) needs one. Run sudo commands normally. ' +
+  'Do not add `-n` or `-S`, do not pipe a password into sudo, and do not ask the user to run sudo ' +
+  'themselves. If the user cancels or the password is wrong, sudo fails as usual; report that.'
 // Time for the band to drop its button and hand the keyboard back (verified at 150 ms).
 const BAND_RELEASE_MS = 150
 const PANE = 'askpass'
@@ -56,6 +63,8 @@ type Request = {
 let askpassPath = ''
 let sessionDir = ''
 let didSetDisplay = false
+// True while the listener runs and the env points at it.
+let isListening = false
 // Bumped whenever a serve loop is replaced, so the old loop's end is not taken for a crash.
 let serveGeneration = 0
 let stopServe = () => {}
@@ -297,6 +306,7 @@ async function setEnv($: EngineInterface): Promise<void> {
 }
 
 async function unsetEnv($: EngineInterface): Promise<void> {
+  isListening = false
   await $.env.set('CC_ASKPASS_DIR', undefined)
   await $.env.set('SUDO_ASKPASS', undefined)
   await $.env.set('SSH_ASKPASS', undefined)
@@ -347,6 +357,7 @@ async function runServe($: EngineInterface): Promise<void> {
         readyTimer.cancel()
         sessionDir = dir
         await setEnv($)
+        isListening = true
       }
     }
   } catch (error) {
@@ -375,6 +386,12 @@ export const register: Register = on => {
     })
     void runServe($).catch(error => log($, `askpass listener failed: ${String(error)}`))
     return started
+  })
+
+  on('prompt.compose', async ($, e, next) => {
+    const composed = await next(e)
+    if (!isListening) return composed
+    return { sections: [...composed.sections, { id: 'cc-askpass:sudo', text: SUDO_NOTE, scope: 'session' as const }] }
   })
 
   on('tool.call', { tool: 'Bash' }, ($, e, next) => {

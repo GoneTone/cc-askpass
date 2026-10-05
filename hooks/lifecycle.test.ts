@@ -165,6 +165,58 @@ test('session.start twice re-sets env', async ($, on) => {
   expect(rec.toasts).toEqual([])
 })
 
+async function sudoNote($: any) {
+  // What the engine passes when it renders a system prompt.
+  const { sections } = await $.prompt.compose({
+    model: 'claude-opus-5-5',
+    promptModel: 'claude-opus-5-5',
+    surfaces: ['terminal'],
+    tools: ['Bash'],
+    outputStyle: null,
+    traits: [],
+    sections: [],
+  })
+  return sections.find((section: { id: string }) => section.id === 'cc-askpass:sudo')
+}
+
+test('tells the model sudo can ask once the listener is ready', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, {})
+  const serve = fakeServe(on)
+  recorder(on)
+  await $.session.start(START)
+  await clock.settle()
+  expect(await sudoNote($)).toBeUndefined()
+  serve.emit(`ready\t${SESSION_DIR}\n`)
+  await clock.settle()
+  const note = await sudoNote($)
+  expect(note?.scope).toBe('session')
+  expect(note?.text).toContain('Do not add `-n` or `-S`')
+})
+
+test('drops the sudo note when the listener stops', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, {})
+  const serve = fakeServe(on)
+  recorder(on)
+  await $.session.start(START)
+  serve.emit(`ready\t${SESSION_DIR}\n`)
+  await clock.settle()
+  serve.end()
+  await clock.settle()
+  expect(await sudoNote($)).toBeUndefined()
+})
+
+test('no sudo note without a person at the prompt', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, {})
+  fakeServe(on)
+  recorder(on)
+  await $.session.start({ ...START, isInteractive: false })
+  await clock.settle()
+  expect(await sudoNote($)).toBeUndefined()
+})
+
 test('session.end removes the session dir', async ($, on) => {
   const clock = mock.clock(on)
   mock.env(on, {})

@@ -55,7 +55,7 @@ Claude's Bash command → sudo → bin/askpass → request FIFO → cc-askpass m
                                      └──────────── reply FIFO ←─────────────────┘
 ```
 
-When a session starts, the mod starts a small listener (`bin/askpass --serve`) and sets these variables for the commands Claude runs: `SUDO_ASKPASS`, `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE=force`, `CC_ASKPASS_DIR`, and `DISPLAY=:0` if `DISPLAY` was unset (sudo only uses askpass when `DISPLAY` is set; `CC_ASKPASS_SET_DISPLAY=1` marks that the mod set it). sudo then runs `bin/askpass`, which hands the prompt to the mod through a FIFO in `$XDG_RUNTIME_DIR/cc-askpass/<session>-<pid>/` (mode 0700). The mod checks with `ps` that the request really comes from `bin/askpass`, shows the pane, and writes your answer into that helper's own FIFO.
+When a session starts, the mod starts a small listener (`bin/askpass --serve`) and sets these variables for the commands Claude runs: `SUDO_ASKPASS`, `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE=force`, `CC_ASKPASS_DIR`, and `DISPLAY=:0` if `DISPLAY` was unset (sudo only uses askpass when `DISPLAY` is set; `CC_ASKPASS_SET_DISPLAY=1` marks that the mod set it). sudo then runs `bin/askpass`, which hands the prompt to the mod through a FIFO in `$XDG_RUNTIME_DIR/cc-askpass/<session>-<pid>/` (mode 0700). The mod checks with `ps` that the request really comes from `bin/askpass`, shows the pane, and writes your answer into that helper's own FIFO. While the listener runs, the mod also adds a short note to Claude's system prompt saying sudo can ask for a password, so Claude runs `sudo` instead of `sudo -n` or asking you to run it yourself.
 
 ## Security
 

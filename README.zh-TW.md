@@ -55,7 +55,7 @@ Claude 的 Bash 指令 → sudo → bin/askpass → 請求 FIFO → cc-askpass m
                                    └──────────── 回覆 FIFO ←──────────────┘
 ```
 
-session 開始時，mod 會啟動一個小型監聽程式（`bin/askpass --serve`），並為 Claude 執行的指令設定這些環境變數：`SUDO_ASKPASS`、`SSH_ASKPASS`、`SSH_ASKPASS_REQUIRE=force`、`CC_ASKPASS_DIR`，以及在 `DISPLAY` 原本沒有設定時補上 `DISPLAY=:0`（sudo 只有在設定了 `DISPLAY` 時才會使用 askpass；`CC_ASKPASS_SET_DISPLAY=1` 標記這是 mod 設的）。sudo 接著執行 `bin/askpass`，它透過 `$XDG_RUNTIME_DIR/cc-askpass/<session>-<pid>/`（權限 0700）裡的 FIFO 把提示交給 mod。mod 用 `ps` 確認請求真的來自 `bin/askpass`，跳出面板，再把你的回答寫進該 helper 專屬的 FIFO。
+session 開始時，mod 會啟動一個小型監聽程式（`bin/askpass --serve`），並為 Claude 執行的指令設定這些環境變數：`SUDO_ASKPASS`、`SSH_ASKPASS`、`SSH_ASKPASS_REQUIRE=force`、`CC_ASKPASS_DIR`，以及在 `DISPLAY` 原本沒有設定時補上 `DISPLAY=:0`（sudo 只有在設定了 `DISPLAY` 時才會使用 askpass；`CC_ASKPASS_SET_DISPLAY=1` 標記這是 mod 設的）。sudo 接著執行 `bin/askpass`，它透過 `$XDG_RUNTIME_DIR/cc-askpass/<session>-<pid>/`（權限 0700）裡的 FIFO 把提示交給 mod。mod 用 `ps` 確認請求真的來自 `bin/askpass`，跳出面板，再把你的回答寫進該 helper 專屬的 FIFO。監聽程式運作期間，mod 也會在 Claude 的 system prompt 加一段說明，告訴它 sudo 可以詢問密碼，所以 Claude 會直接執行 `sudo`，而不是改用 `sudo -n` 或請你自己執行。
 
 ## 安全性
 

@@ -61,6 +61,8 @@ export function recorder(on: On, answer: (argv: readonly string[]) => Partial<Pr
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.end', () => ({ sessionId: SESSION_ID }))
   on('session.id', () => ({ value: SESSION_ID }))
+  // The engine's system prompt, reduced to one section.
+  on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'base prompt', scope: 'shared' as const }] }))
   // The engine's own band when no plugin draws one: nothing.
   on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Box', props: {}, children: [] }) as never)
   on('env.set', (_$, e) => {
