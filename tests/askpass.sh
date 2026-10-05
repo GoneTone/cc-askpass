@@ -169,8 +169,17 @@ test_serve_refuses_unsafe_session_ids() {
   teardown
 }
 
+test_serve_trims_trailing_slash() {
+  setup 'serve trims a trailing slash in XDG_RUNTIME_DIR'
+  XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR/"
+  start_serve s1
+  [ "$dir" = "${XDG_RUNTIME_DIR%/}/cc-askpass/s1" ] || fail "dir: $dir"
+  teardown
+}
+
 test_serve_prints_ready
 test_serve_refuses_unsafe_session_ids
+test_serve_trims_trailing_slash
 test_round_trip_keeps_special_characters
 test_empty_reply_exits_1
 test_prompt_with_tab_and_backslash

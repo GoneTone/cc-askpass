@@ -19,7 +19,7 @@ serve() {
       ;;
   esac
   if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
-    base="$XDG_RUNTIME_DIR/$me"
+    base="${XDG_RUNTIME_DIR%/}/$me"
   else
     base="/tmp/$me-$(id -u)"
   fi
