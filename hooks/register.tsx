@@ -43,8 +43,12 @@ const MAX_SECTION_ROWS = 3
 // the FIFO being removed between that test and the open (`<>` would create a file).
 // Read-write so the open never blocks.
 const REPLY_SCRIPT = '[ -p "$1" ] || exit 1; exec 3<>"$1"; [ -p /dev/fd/3 ] || { rm -f "$1"; exit 1; }; cat >&3'
-// `<owner uid> <path>` of a process's executable (Linux /proc).
-const EXE_SCRIPT = 't=$(readlink -f "/proc/$1/exe") || exit 1; printf \'%s %s\n\' "$(stat -c %u "$t")" "$t"'
+// `<owner uid> <path>` of a process's executable, from the kernel so argv[0] cannot fake it:
+// /proc on Linux; on macOS the first `txt` file lsof lists for the process. GNU stat takes
+// -c, BSD stat -f.
+const EXE_SCRIPT =
+  't=$(readlink -f "/proc/$1/exe" 2>/dev/null) || t=$(lsof -a -p "$1" -d txt -Fn -n -P 2>/dev/null | sed -n "s/^n//p" | head -n 1); ' +
+  '[ -n "$t" ] || exit 1; u=$(stat -c %u "$t" 2>/dev/null) || u=$(stat -f %u "$t") || exit 1; printf \'%s %s\\n\' "$u" "$t"'
 
 type Request = {
   helperPid: number

@@ -105,8 +105,10 @@ export class AnsweredPids {
 // Programs other than sudo whose askpass answer goes back to them, not to the caller.
 // Plain `git` is left out: `git credential fill` prints the answer to stdout. git's HTTPS
 // prompts come from its remote helper.
-// `comm` is cut at 15 characters: git-remote-https reads as git-remote-http.
+// Linux cuts `comm` at 15 characters (git-remote-https reads as git-remote-http); macOS
+// does not, so comm is cut the same way before the lookup.
 const ASKPASS_CLIENTS = ['ssh', 'ssh-add', 'scp', 'sftp', 'git-remote-http']
+const COMM_LENGTH = 15
 
 export type ExeInfo = { uid: number; path: string }
 
@@ -122,7 +124,7 @@ export function parseExeInfo(out: string): ExeInfo | null {
  * A root-owned binary named like the process rules out scripts and copies in /tmp.
  */
 export function isTrustedClient(requester: Requester, exe: ExeInfo | null): boolean {
-  if (exe === null || exe.uid !== 0 || !ASKPASS_CLIENTS.includes(requester.comm)) return false
+  if (exe === null || exe.uid !== 0 || !ASKPASS_CLIENTS.includes(requester.comm.slice(0, COMM_LENGTH))) return false
   return (exe.path.split('/').at(-1) ?? '').startsWith(requester.comm)
 }
 

@@ -75,7 +75,7 @@ Claude 的 Bash 命令 → sudo → bin/askpass → 请求 FIFO → cc-askpass m
 - 非交互模式（`claude -p`、SDK）下没有人能回答，mod 不会启动，sudo 会和没装 mod 时一样直接失败。
 - 开启 Bash 沙箱时，sudo 无法提权，helper 也看不到监听程序，会立即以“the cc-askpass listener is not running”失败。
 - ssh 的确认提示（`SSH_ASKPASS_PROMPT=confirm`）会以普通文本输入的形式出现。
-- 在 macOS 上，ssh 和 git 的提示会被拒绝，因为确认调用者是真正 ssh/git 可执行文件的检查需要 Linux 的 `/proc`。sudo 可以正常使用。
+- 在 macOS 上，确认 ssh/git 调用者是 root 拥有的真正可执行文件的检查改用 `lsof`，而不是 Linux 的 `/proc`。这部分未经测试；检查失败时会拒绝该提示。sudo 不依赖这个检查。
 
 ## 卸载
 

@@ -75,7 +75,7 @@ When a session starts, the mod starts a small listener (`bin/askpass --serve`) a
 - In non-interactive runs (`claude -p`, the SDK) the mod does nothing, since nobody could answer; sudo fails as it would without it.
 - With the Bash sandbox on, sudo cannot raise privileges and the helper cannot see the listener, so it fails at once with "the cc-askpass listener is not running".
 - ssh confirmation prompts (`SSH_ASKPASS_PROMPT=confirm`) appear as a plain text prompt.
-- On macOS, ssh and git prompts are rejected because the check that the caller is a real ssh/git binary needs Linux's `/proc`. sudo works.
+- On macOS, the check that an ssh/git caller is a real root-owned binary uses `lsof` instead of Linux's `/proc`. It is untested there; a failed check rejects the prompt. sudo does not depend on it.
 
 ## Uninstall
 

@@ -74,6 +74,10 @@ test('isTrustedClient accepts root-owned ssh and git binaries only', () => {
   expect(isTrustedClient(ssh, null)).toBe(false)
   const remote = { pid: 1, isSudo: false, comm: 'git-remote-http', command: 'git-remote-https origin' }
   expect(isTrustedClient(remote, parseExeInfo('0 /usr/lib/git-core/git-remote-https\n'))).toBe(true)
+  // macOS does not cut comm at 15 characters.
+  const macRemote = { ...remote, comm: 'git-remote-https' }
+  expect(isTrustedClient(macRemote, parseExeInfo('0 /Library/Developer/CommandLineTools/usr/libexec/git-core/git-remote-https\n'))).toBe(true)
+  expect(isTrustedClient({ ...remote, comm: 'sshd' }, parseExeInfo('0 /usr/sbin/sshd\n'))).toBe(false)
   // `git credential fill` prints what it is told to stdout, where Claude reads it.
   const git = { pid: 1, isSudo: false, comm: 'git', command: 'git credential fill' }
   expect(isTrustedClient(git, parseExeInfo('0 /usr/bin/git\n'))).toBe(false)
