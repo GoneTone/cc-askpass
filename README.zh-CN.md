@@ -69,12 +69,11 @@ Claude 的 Bash 命令 → sudo → bin/askpass → 请求 FIFO → cc-askpass m
 - `su` 和 `doas` 不支持 askpass，请改用 sudo。
 - polkit（`pkexec`、`run0`、以普通用户运行 `systemctl`）会直接报错“Interactive authentication required”而不会询问。
 - 不处理 y/n 之类的提问，请使用 `-y`、`--no-interaction` 等参数。
-- 遮盖输入只跟踪在输入框末尾的输入和删除。如果移动了光标，请按 Show 确认，或清空后重新输入。
+- 遮盖输入可以在输入框任何位置输入，但在中间删除的字符会被当成删掉末尾的字符。如果在中间编辑过，请按 Show 确认，或清空后重新输入。
 - 在没有图形界面的主机上，`DISPLAY=:0` 这个占位值可能让少数图形程序（例如 `xdg-open`）尝试连接 X server 而失败。
 - 移动端 app（以及从手机使用 Remote Control）无法显示输入框，请改在终端或桌面版 app 回答。
 - 非交互模式（`claude -p`、SDK）下没有人能回答，mod 不会启动，sudo 会和没装 mod 时一样直接失败。
 - 开启 Bash 沙箱时，sudo 无法提权，helper 也看不到监听程序，会立即以“the cc-askpass listener is not running”失败。
-- mod 重新加载时（`/reload-plugins`，或开发时修改了它）正在等待的请求会丢失，那个命令会等到 Bash 超时才结束。
 - ssh 的确认提示（`SSH_ASKPASS_PROMPT=confirm`）会以普通文本输入的形式出现。
 - 在 macOS 上，ssh 和 git 的提示会被拒绝，因为确认调用者是真正 ssh/git 可执行文件的检查需要 Linux 的 `/proc`。sudo 可以正常使用。
 

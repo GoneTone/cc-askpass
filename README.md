@@ -69,12 +69,11 @@ When a session starts, the mod starts a small listener (`bin/askpass --serve`) a
 - `su` and `doas` cannot use askpass. Use sudo.
 - polkit (`pkexec`, `run0`, `systemctl` as a normal user) fails with "Interactive authentication required" instead of asking.
 - Yes/no prompts are not handled. Use flags such as `-y` or `--no-interaction`.
-- Masked input only tracks typing and deleting at the end of the field. If you move the cursor, press Show to check, or clear the field and type again.
+- Masked input tracks typing anywhere in the field, but a character deleted in the middle counts as deleted at the end. If you edit in the middle, press Show to check, or clear the field and type again.
 - On hosts without a display, the `DISPLAY=:0` placeholder may make a few graphical programs (for example `xdg-open`) try to reach an X server and fail.
 - The mobile app (and Remote Control from a phone) cannot show an input field; answer from the terminal or the desktop app.
 - In non-interactive runs (`claude -p`, the SDK) the mod does nothing, since nobody could answer; sudo fails as it would without it.
 - With the Bash sandbox on, sudo cannot raise privileges and the helper cannot see the listener, so it fails at once with "the cc-askpass listener is not running".
-- A request pending while the mod reloads (`/reload-plugins`, or editing it during development) is lost; its command waits until the Bash timeout.
 - ssh confirmation prompts (`SSH_ASKPASS_PROMPT=confirm`) appear as a plain text prompt.
 - On macOS, ssh and git prompts are rejected because the check that the caller is a real ssh/git binary needs Linux's `/proc`. sudo works.
 

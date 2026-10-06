@@ -69,12 +69,11 @@ session 開始時，mod 會啟動一個小型監聽程式（`bin/askpass --serve
 - `su` 和 `doas` 不支援 askpass，請改用 sudo。
 - polkit（`pkexec`、`run0`、以一般使用者執行 `systemctl`）會直接顯示「Interactive authentication required」而不會詢問。
 - 不處理 y/n 之類的提問，請使用 `-y`、`--no-interaction` 等參數。
-- 遮罩輸入只追蹤在欄位尾端的輸入和刪除。如果移動了游標，請按 Show 確認，或清空後重新輸入。
+- 遮罩輸入可以在欄位任何位置輸入，但在中間刪除的字元會被當成刪掉尾端的字元。如果在中間編輯過，請按 Show 確認，或清空後重新輸入。
 - 在沒有圖形介面的主機上，`DISPLAY=:0` 這個假值可能讓少數圖形程式（例如 `xdg-open`）嘗試連線 X server 而失敗。
 - 行動版 app（以及從手機使用 Remote Control）無法顯示輸入欄位，請改在終端機或桌面版 app 回答。
 - 非互動模式（`claude -p`、SDK）下沒有人能回答，mod 不會啟動，sudo 會和沒裝 mod 時一樣直接失敗。
 - 開啟 Bash 沙箱時，sudo 無法提權，helper 也看不到監聽程式，會立刻以「the cc-askpass listener is not running」失敗。
-- mod 重新載入時（`/reload-plugins`，或開發時修改了它）正在等待的請求會遺失，那個指令會等到 Bash 逾時才結束。
 - ssh 的確認提示（`SSH_ASKPASS_PROMPT=confirm`）會以一般文字輸入的形式出現。
 - 在 macOS 上，ssh 和 git 的提示會被拒絕，因為確認呼叫者是真正 ssh／git 執行檔的檢查需要 Linux 的 `/proc`。sudo 可以正常使用。
 
