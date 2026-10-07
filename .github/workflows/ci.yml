@@ -6,7 +6,10 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -17,4 +20,7 @@ jobs:
       - run: claude --version
       - run: claude plugin validate .
       - run: claude plugin test .
+      # The helper tests use GNU timeout; on macOS it comes with Homebrew's coreutils.
+      - if: runner.os == 'macOS'
+        run: brew install coreutils && echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
       - run: sh tests/askpass.sh

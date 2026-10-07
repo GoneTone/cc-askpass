@@ -43,12 +43,6 @@ const MAX_SECTION_ROWS = 3
 // the FIFO being removed between that test and the open (`<>` would create a file).
 // Read-write so the open never blocks.
 const REPLY_SCRIPT = '[ -p "$1" ] || exit 1; exec 3<>"$1"; [ -p /dev/fd/3 ] || { rm -f "$1"; exit 1; }; cat >&3'
-// `<owner uid> <path>` of a process's executable, from the kernel so argv[0] cannot fake it:
-// /proc on Linux; on macOS the first `txt` file lsof lists for the process. GNU stat takes
-// -c, BSD stat -f.
-const EXE_SCRIPT =
-  't=$(readlink -f "/proc/$1/exe" 2>/dev/null) || t=$(lsof -a -p "$1" -d txt -Fn -n -P 2>/dev/null | sed -n "s/^n//p" | head -n 1); ' +
-  '[ -n "$t" ] || exit 1; u=$(stat -c %u "$t" 2>/dev/null) || u=$(stat -f %u "$t") || exit 1; printf \'%s %s\\n\' "$u" "$t"'
 
 type Request = {
   helperPid: number
@@ -124,7 +118,8 @@ async function verify($: EngineInterface, line: string): Promise<void> {
   const request: Request = { ...parsed, requester, isRetry: false, claudeCommand: null }
 
   if (!requester.isSudo) {
-    const exe = await $.process.run(['sh', '-c', EXE_SCRIPT, '_', String(requester.pid)])
+    // `<owner uid> <path>` of the caller's executable (bin/exe-of).
+    const exe = await $.process.run(['sh', `${$.plugin.root}/bin/exe-of`, String(requester.pid)])
     if (!isTrustedClient(requester, exe.exitCode === 0 ? parseExeInfo(exe.stdout) : null)) {
       // The helper is ours: an empty answer makes it fail at once instead of waiting.
       $.ui.toast(`Rejected askpass request from ${requester.comm} (pid ${requester.pid})`)

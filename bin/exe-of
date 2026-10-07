@@ -1,0 +1,10 @@
+#!/bin/sh
+# exe-of <pid>: print "<owner uid> <path>" of a process's executable, as the kernel
+# records it, so argv[0] cannot fake it. Linux reads /proc; macOS has no /proc, so
+# the first `txt` file lsof lists for the process is its executable. GNU stat takes
+# -c, BSD stat -f.
+exe=$(readlink -f "/proc/$1/exe" 2> /dev/null) ||
+  exe=$(lsof -a -p "$1" -d txt -Fn -n -P 2> /dev/null | sed -n 's/^n//p' | head -n 1)
+[ -n "$exe" ] || exit 1
+uid=$(stat -c %u "$exe" 2> /dev/null) || uid=$(stat -f %u "$exe") || exit 1
+printf '%s %s\n' "$uid" "$exe"

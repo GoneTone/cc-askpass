@@ -294,6 +294,21 @@ test_restarted_serve_drops_dead_requests() {
   teardown
 }
 
+test_exe_of_names_a_live_process() {
+  setup 'exe-of prints the owner and path of a live process'
+  sleep 30 &
+  sleeper=$!
+  line=$("$root/bin/exe-of" "$sleeper") || fail 'exe-of failed for a live pid'
+  case "$line" in
+    "0 "*/sleep) ;;
+    *) fail "exe-of printed: $line" ;;
+  esac
+  kill "$sleeper"
+  wait "$sleeper" 2> /dev/null
+  "$root/bin/exe-of" "$sleeper" > /dev/null 2>&1 && fail 'exe-of succeeded for a dead pid'
+  teardown
+}
+
 test_serve_prints_ready
 test_serve_refuses_unsafe_session_ids
 test_serve_trims_trailing_slash
@@ -311,6 +326,7 @@ test_long_prompt_is_truncated
 test_two_processes_resuming_one_session
 test_restarted_serve_resends_pending_requests
 test_restarted_serve_drops_dead_requests
+test_exe_of_names_a_live_process
 
 if [ "$failures" -eq 0 ]; then
   echo 'PASS: all askpass tests'

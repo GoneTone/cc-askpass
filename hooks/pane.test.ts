@@ -39,7 +39,7 @@ async function world($: any, on: any) {
     }
     // The shell's own kill: /bin/kill may be missing.
     if (argv[0] === 'sh' && argv[2] === 'kill -0 "$1"') return { exitCode: alive.has(Number(argv[4])) ? 0 : 1 }
-    if (argv[0] === 'sh' && argv[2]?.includes('readlink')) {
+    if (argv[0] === 'sh' && argv[1]?.endsWith('/bin/exe-of')) {
       const out = exes.get(argv[argv.length - 1] ?? '')
       return out === undefined ? { exitCode: 1 } : { stdout: `${out}\n` }
     }
