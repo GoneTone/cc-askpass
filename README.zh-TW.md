@@ -45,6 +45,25 @@ claude plugin install cc-askpass@cc-askpass
 - 面板出現在哪裡由 Claude Code 決定：fullscreen 模式且寬度 110 欄以上時停靠在對話記錄旁邊，其他情況出現在提示列上方。
 - 終端機寬度不到 144 欄時，面板可能不會自動跳出，這時提示列上方會顯示 `sudo is waiting for a password — click the button below or type /askpass`，下方有一個 **Open password prompt** 按鈕。點按鈕或輸入 `/askpass` 即可開啟，Claude 執行中也能用。非 fullscreen 模式下終端機不支援滑鼠點擊，這行提示會改成請你按 ctrl+x tab（鍵盤會移到按鈕上）再按 Enter，或輸入 `/askpass`。
 
+### 遠端主機
+
+透過 ssh 連到其他主機時，那裡的密碼提示也會用同一個面板：
+
+- `ssh host sudo apt update`，以及遠端腳本裡的 sudo（`ssh host ./deploy.sh`）。
+- 再往下跳：從遠端主機再 `ssh` 到第三台。
+- rsync、ansible 和會呼叫 ssh 的腳本。
+
+無法參與的主機會被自動偵測並原封不動放行，ssh 的行為和沒裝 cc-askpass 時一樣：git 代管服務（`git@github.com`）、網路設備、設有 forced command 的帳號、Windows sshd，以及沒有 `/bin/sh` 的主機。
+
+面板會標出主機名稱（`sudo on server needs your password`），在 `$` 那行後面加上 `(reported by server)`，而且遠端提示一律顯示 `Claude ran:` 那行，外加一則警告，請你回答前先確認。
+
+在你自己的機器上，PATH 裡找到的 `ssh` 必須是屬於 root 的執行檔（例如 `/usr/bin/ssh`），否則 ssh 照常執行，不會有遠端提示。呼叫端自己指定的 `ControlPath` 或 `-S` 不會被沿用，所以像 ansible 這類工具會多開一條連線。
+
+有兩個選項，可在 `/config` 或設定檔裡設定：
+
+- `remoteHosts`（預設開啟）：回答遠端主機的提示。要關閉，請設定 `"pluginConfigs": { "cc-askpass": { "options": { "remoteHosts": false } } }`。
+- `excludeHosts`：用主機名稱比對的 glob 模式；ssh 到符合的主機時一律不處理。
+
 ## 一段時間內只問一次
 
 Claude 執行的每個 Bash 指令都是新的行程，所以 sudo 每次都會再問密碼。cc-askpass 不會暫存密碼，因為以你的身分執行的任何程式都可能讀到暫存的密碼。若想讓 sudo 記住「已經驗證過」，請執行 `sudo visudo -f /etc/sudoers.d/cc-askpass` 並加入：
@@ -65,12 +84,16 @@ Claude 的 Bash 指令 → sudo → bin/askpass → 請求 FIFO → cc-askpass m
 
 session 開始時，mod 會啟動一個小型監聽程式（`bin/askpass --serve`），並為 Claude 執行的指令設定這些環境變數：`SUDO_ASKPASS`、`SSH_ASKPASS`、`SSH_ASKPASS_REQUIRE=force`、`CC_ASKPASS_DIR`，以及在 `DISPLAY` 原本沒有設定時補上 `DISPLAY=:0`（sudo 只有在設定了 `DISPLAY` 時才會使用 askpass；`CC_ASKPASS_SET_DISPLAY=1` 標記這是 mod 設的）。sudo 接著執行 `bin/askpass`，它透過 `$XDG_RUNTIME_DIR/cc-askpass/<session>-<pid>/`（權限 0700）裡的 FIFO 把提示交給 mod。mod 用 `ps` 確認請求真的來自 `bin/askpass`，跳出面板，再把你的回答寫進該 helper 專屬的 FIFO。監聽程式運作期間，mod 也會在 Claude 的 system prompt 加一段說明，告訴它 sudo 可以詢問密碼，所以 Claude 會直接執行 `sudo`，而不是改用 `sudo -n` 或請你自己執行。
 
+對 ssh，mod 還會在 Claude 執行的指令的 PATH 最前面放一個小型 `ssh` 包裝程式。它用私有的連線啟動真正的 ssh，檢查該主機能否參與，並建立一條轉送通道，讓那裡出現的提示（遠端主機上的 sudo，或再往下一跳的 ssh）經由同一個 FIFO 回到面板。沒通過檢查的主機，或不屬於 root 的 ssh，都會和沒裝時一樣照常執行。
+
 ## 安全性
 
 - 密碼不會寫入模型的 context、log、toast、status line、指令參數或任何檔案。
 - 只接受由 root 身分的 sudo，或屬於 root 的 `ssh`、`ssh-add`、`scp`、`sftp`、`git-remote-http(s)`（git 的 HTTPS 輔助程式）執行檔所啟動的 `bin/askpass` 請求。其他來源一律拒絕，例如指令自己執行 `$SUDO_ASKPASS` 來讀取你的回答。
 - 面板會顯示實際要求密碼的指令，回答前請先確認：`ssh` 或 `git` 指令會把你的回答送到它指定的伺服器。
 - 限制：以你自己的使用者身分執行的惡意程式，有機會在真正的請求進行時搶先讀走回覆。cc-askpass 的目標是正常使用下不讓密碼進入模型的 context，它不是防範同一使用者底下惡意程式的沙箱。
+- 遠端請求會在遠端主機上以和本機相同的規則驗證（以 root 身分的 sudo、屬於 root 的 ssh 和 git 用戶端），所以只是呼叫 askpass 的指令在那裡什麼也拿不到。
+- 殘餘風險：以你的身分執行的程式，不論在你的機器或遠端主機上，包括 Claude 執行的、刻意偽裝的指令，都能讓指名某台遠端主機的面板跳出來，並取得你輸入的內容。本機的 sudo 提示不受影響。請檢查 `Claude ran:` 那行，只回答你預期中的提示，而且在指名其他主機的面板裡，輸入的要是那台遠端主機的密碼（絕不是本機的密碼）。把 `remoteHosts` 設為 `false` 即可關閉這項功能。
 
 ## 限制
 
@@ -83,6 +106,9 @@ session 開始時，mod 會啟動一個小型監聽程式（`bin/askpass --serve
 - 非互動模式（`claude -p`、SDK）下沒有人能回答，mod 不會啟動，sudo 會和沒裝 mod 時一樣直接失敗。
 - 開啟 Bash 沙箱時，sudo 無法提權，helper 也看不到監聽程式，會立刻以「the cc-askpass listener is not running」失敗。
 - ssh 的確認提示（`SSH_ASKPASS_PROMPT=confirm`）會以一般文字輸入的形式出現。
+- 以 Windows sshd 作為遠端主機時原封不動放行（沒有遠端提示）。
+- 在 `ssh -t` 底下以絕對路徑呼叫 `/usr/bin/sudo` 時，它會直接讀取終端機而不是詢問。
+- 使用者自行安裝（不屬於 root）的 ssh 不會有遠端提示。
 
 ## 移除
 

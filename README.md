@@ -45,6 +45,25 @@ Ask Claude to run anything that needs sudo. A **sudo password** pane opens and s
 - Claude Code decides where the pane goes: beside the transcript in fullscreen mode at 110 columns or more, otherwise above the prompt.
 - If the terminal is narrower than 144 columns the pane may not open on its own. A line above the prompt then says `sudo is waiting for a password — click the button below or type /askpass`, with an **Open password prompt** button under it. Click the button or type `/askpass`; both work while Claude is busy. Outside fullscreen mode the terminal reports no clicks, so the line says to press ctrl+x tab (which puts the keyboard on the button) then Enter, or type `/askpass`.
 
+### Remote hosts
+
+Password prompts on other hosts reached with ssh get the same pane:
+
+- `ssh host sudo apt update`, and sudo inside a remote script (`ssh host ./deploy.sh`).
+- Further hops: `ssh` run from the remote host to a third one.
+- rsync, ansible and scripts that call ssh.
+
+Hosts that cannot take part are detected and left untouched automatically, so ssh behaves as it would without cc-askpass: git hosting (`git@github.com`), network devices, accounts with a forced command, Windows sshd, and hosts without `/bin/sh`.
+
+The pane names the host (`sudo on server needs your password`), labels the `$` line `(reported by server)`, and for remote prompts always shows the `Claude ran:` line plus a warning to check it before you answer.
+
+On your own machine, the `ssh` found on PATH must be a root-owned binary (for example `/usr/bin/ssh`); otherwise ssh runs unchanged and there are no remote prompts. A caller's own `ControlPath` or `-S` is not reused, so tools such as ansible open one extra connection.
+
+Two options, set in `/config` or in settings:
+
+- `remoteHosts` (default on): answer prompts from remote hosts. Turn it off with `"pluginConfigs": { "cc-askpass": { "options": { "remoteHosts": false } } }`.
+- `excludeHosts`: glob patterns matched against the host name; ssh to a matching host is never wrapped.
+
 ## Ask once instead of every time
 
 Every Bash command Claude runs is a new process, so sudo asks for the password every time. cc-askpass does not cache passwords: a cached password could be read by any process running as you. To have sudo remember that you authenticated instead, run `sudo visudo -f /etc/sudoers.d/cc-askpass` and add:
@@ -65,12 +84,16 @@ Claude's Bash command → sudo → bin/askpass → request FIFO → cc-askpass m
 
 When a session starts, the mod starts a small listener (`bin/askpass --serve`) and sets these variables for the commands Claude runs: `SUDO_ASKPASS`, `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE=force`, `CC_ASKPASS_DIR`, and `DISPLAY=:0` if `DISPLAY` was unset (sudo only uses askpass when `DISPLAY` is set; `CC_ASKPASS_SET_DISPLAY=1` marks that the mod set it). sudo then runs `bin/askpass`, which hands the prompt to the mod through a FIFO in `$XDG_RUNTIME_DIR/cc-askpass/<session>-<pid>/` (mode 0700). The mod checks with `ps` that the request really comes from `bin/askpass`, shows the pane, and writes your answer into that helper's own FIFO. While the listener runs, the mod also adds a short note to Claude's system prompt saying sudo can ask for a password, so Claude runs `sudo` instead of `sudo -n` or asking you to run it yourself.
 
+For ssh, the mod also puts a small `ssh` wrapper first on the PATH of the commands Claude runs. It starts the real ssh with a private connection to the host, checks that the host can take part, and sets up a relay so that a prompt raised there (sudo on the remote host, or a further ssh hop) comes back through the same FIFO to the pane. Hosts that fail the check, or an ssh that is not root-owned, run exactly as without it.
+
 ## Security
 
 - The password is never written to the model's context, logs, toasts, the status line, command-line arguments, or files.
 - Requests are accepted only from `bin/askpass` started by sudo running as root, or by root-owned `ssh`, `ssh-add`, `scp`, `sftp` or `git-remote-http(s)` (git's HTTPS helper) binaries. Anything else, such as a command running `$SUDO_ASKPASS` itself to read your answer, is rejected.
 - The pane shows the real command that asked. Check it before you answer: an `ssh` or `git` command sends your answer to the server it names.
 - Limitation: a malicious process running as your own user can race to read the reply to a genuine request. cc-askpass keeps the password out of the model's context in normal use; it is not a sandbox against hostile code running as you.
+- Remote requests are verified on the remote host with the same rules as locally (sudo running as root, root-owned ssh and git clients), so a command that merely calls askpass there gets nothing.
+- Residual risk: a process running as you, on your machine or on the remote host, including a command Claude runs that deliberately disguises itself, can make a pane that names a remote host appear and capture what you type. Local sudo prompts are not affected. Check the `Claude ran:` line, answer only prompts you expected, and type the remote host's password (never a local one) into a pane that names another host. Set `remoteHosts` to `false` to turn the feature off.
 
 ## Limitations
 
@@ -83,6 +106,9 @@ When a session starts, the mod starts a small listener (`bin/askpass --serve`) a
 - In non-interactive runs (`claude -p`, the SDK) the mod does nothing, since nobody could answer; sudo fails as it would without it.
 - With the Bash sandbox on, sudo cannot raise privileges and the helper cannot see the listener, so it fails at once with "the cc-askpass listener is not running".
 - ssh confirmation prompts (`SSH_ASKPASS_PROMPT=confirm`) appear as a plain text prompt.
+- A Windows sshd as the remote host is left untouched (no remote prompts).
+- `/usr/bin/sudo` called by absolute path under `ssh -t` reads the terminal instead of asking.
+- A user-installed (not root-owned) ssh means no remote prompts.
 
 ## Uninstall
 

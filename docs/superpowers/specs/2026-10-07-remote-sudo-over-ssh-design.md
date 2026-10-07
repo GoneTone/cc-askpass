@@ -1,6 +1,6 @@
 # cc-askpass — Remote password prompts over ssh — Design
 
-Status: approved design, not yet implemented (2026-10-07).
+Status: implemented (2026-10-07); CI on GitHub and manual end-to-end pending.
 Extends `2026-10-05-claude-code-askpass-design.md`; everything there still holds unless this
 document says otherwise. Native Windows support is a separate sub-project (B) with its own spec.
 
