@@ -15,6 +15,8 @@ import {
   parseParentPs,
   parseReady,
   parseRequest,
+  relayHost,
+  remoteLabel,
   promptLabel,
   wrappedLines,
   shouldMask,
@@ -40,10 +42,35 @@ test('parseRequest reads pid and prompt', () => {
   expect(parseRequest('4242\t[sudo] password for alice: ')).toEqual({
     helperPid: 4242,
     prompt: '[sudo] password for alice: ',
+    via: null,
+    reported: null,
   })
   expect(parseRequest('abc\tx')).toBe(null)
   expect(parseRequest('')).toBe(null)
   expect(parseRequest('0\tx')).toBe(null)
+})
+
+test('parseRequest reads the optional via and reported fields', () => {
+  expect(parseRequest('42	Password: ')).toEqual({ helperPid: 42, prompt: 'Password: ', via: null, reported: null })
+  expect(parseRequest('42	Password: 	db01	sudo apt update')).toEqual({
+    helperPid: 42, prompt: 'Password: ', via: 'db01', reported: 'sudo apt update',
+  })
+  expect(parseRequest('42	Password: 		sudo true')?.via).toBe(null)
+})
+
+test('relayHost accepts only the plugin wrapper in relay mode', () => {
+  const shim = '/opt/p/bin/shim/ssh'
+  expect(relayHost(`/bin/sh ${shim} --relay server`, shim)).toBe('server')
+  expect(relayHost(`${shim} --relay alice@db-1.example.com`, shim)).toBe('alice@db-1.example.com')
+  expect(relayHost(`/bin/sh ${shim} -p 22 server sudo x`, shim)).toBe(null)
+  expect(relayHost(`/bin/sh /tmp/evil --relay server`, shim)).toBe(null)
+  expect(relayHost(`/bin/sh ${shim} --relay server; rm`, shim)).toBe(null)
+})
+
+test('remoteLabel ends with the verified host', () => {
+  expect(remoteLabel('server', null)).toBe('server')
+  expect(remoteLabel('server', 'db01')).toBe('db01 via server')
+  expect(remoteLabel('server', 'db01 via evil')).toBe('db01 via evil via server')
 })
 
 test('parseHelperPs reads ppid and args', () => {

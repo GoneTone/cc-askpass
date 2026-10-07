@@ -19,11 +19,37 @@ export function parseReady(line: string): string | null {
   return /^ready\t(.+)$/.exec(line)?.[1] ?? null
 }
 
-/** A helper's request line, `<pid><TAB><prompt>`. */
-export function parseRequest(line: string): { helperPid: number; prompt: string } | null {
-  const [, pid, prompt] = /^(\d+)\t(.*)$/.exec(line) ?? []
+/**
+ * A helper's request line, `<pid><TAB><prompt>`, optionally followed by `<TAB><via><TAB><reported>`:
+ * the host chain and the command a relayed prompt claims. Empty optional fields become null.
+ */
+export function parseRequest(
+  line: string,
+): { helperPid: number; prompt: string; via: string | null; reported: string | null } | null {
+  const [, pid, prompt, via, reported] = /^(\d+)\t([^\t]*)(?:\t([^\t]*)(?:\t(.*))?)?$/.exec(line) ?? []
   if (pid === undefined || prompt === undefined || Number(pid) <= 0) return null
-  return { helperPid: Number(pid), prompt }
+  return { helperPid: Number(pid), prompt, via: via || null, reported: reported || null }
+}
+
+/**
+ * The host of a process running our ssh wrapper as `[<interpreter> ]<shimPath> --relay <host>`;
+ * null for any other process or a host with characters outside what ssh hosts use.
+ */
+export function relayHost(args: string, shimPath: string): string | null {
+  const afterInterpreter = args.slice(args.indexOf(' ') + 1)
+  for (const candidate of [args, afterInterpreter]) {
+    if (!candidate.startsWith(`${shimPath} --relay `)) continue
+    const host = candidate.slice(shimPath.length + ' --relay '.length)
+    if (/^[A-Za-z0-9._@:%-]+$/.test(host)) return host
+  }
+  return null
+}
+
+/** A relayed request's label: the reported host chain, then the host we verified, which always comes last. */
+export function remoteLabel(host: string, via: string | null): string {
+  if (!via) return host
+  const suffix = ` via ${host}`
+  return `${via.endsWith(suffix) ? via.slice(0, -suffix.length) : via}${suffix}`
 }
 
 /** Output of `ps -o ppid=,args= -p <helper pid>`; the args keep the prompt's trailing space. */
