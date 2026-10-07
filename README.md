@@ -23,7 +23,7 @@ So you end up copying the command into your own terminal, running it there and t
 ## Requirements
 
 - Claude Code 2.1.289 or later
-- Linux, WSL or macOS (tested on macOS 14 and 26). Native Windows is not supported.
+- Linux, WSL or macOS (tested on macOS 14 and 26).
 
 ## Install
 

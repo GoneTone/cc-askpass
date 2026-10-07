@@ -23,7 +23,7 @@ sudo: a password is required
 ## 要求
 
 - Claude Code 2.1.289 及以上
-- Linux、WSL 或 macOS（已在 macOS 14 和 26 测试）。不支持 Windows 原生版。
+- Linux、WSL 或 macOS（已在 macOS 14 和 26 测试）。
 
 ## 安装
 
