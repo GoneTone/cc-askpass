@@ -20,7 +20,4 @@ jobs:
       - run: claude --version
       - run: claude plugin validate .
       - run: claude plugin test .
-      # The helper tests use GNU timeout; on macOS it comes with Homebrew's coreutils.
-      - if: runner.os == 'macOS'
-        run: brew install coreutils && echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
       - run: sh tests/askpass.sh

@@ -22,6 +22,23 @@ wait_lines() {
   done
 }
 
+# with_timeout SECONDS COMMAND...: GNU timeout, which macOS lacks. Exits 124 when the
+# command had to be killed.
+with_timeout() {
+  seconds=$1
+  shift
+  "$@" &
+  command_pid=$!
+  (sleep "$seconds" && kill "$command_pid" 2> /dev/null) &
+  watchdog_pid=$!
+  wait "$command_pid"
+  status=$?
+  # Reaped with stderr closed: bash (macOS sh) reports a killed job as "Terminated".
+  kill "$watchdog_pid" 2> /dev/null || return 124
+  wait "$watchdog_pid" 2> /dev/null
+  return "$status"
+}
+
 setup() {
   current=$1
   tmp=$(mktemp -d)
@@ -134,7 +151,7 @@ test_unsafe_tmp_base_is_refused() {
   else
     mkdir "$tmp/target"
     ln -s "$tmp/target" "$base"
-    env -u XDG_RUNTIME_DIR timeout 5 "$askpass" --serve s1 > /dev/null 2> "$tmp/err"
+    with_timeout 5 env -u XDG_RUNTIME_DIR "$askpass" --serve s1 > /dev/null 2> "$tmp/err"
     status=$?
     rm -f "$base"
     [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "serve exit $status"
@@ -218,7 +235,7 @@ test_dead_listener_fails_fast() {
   setup 'a helper fails at once when the listener is gone'
   start_serve s1
   stop_serve
-  CC_ASKPASS_DIR=$dir timeout 5 "$askpass" 'Password: ' > /dev/null 2> "$tmp/err"
+  with_timeout 5 env CC_ASKPASS_DIR="$dir" "$askpass" 'Password: ' > /dev/null 2> "$tmp/err"
   status=$?
   [ "$status" -eq 1 ] || fail "exit $status"
   [ -s "$tmp/err" ] || fail 'no message on stderr'

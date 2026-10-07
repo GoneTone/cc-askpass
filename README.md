@@ -88,7 +88,7 @@ If you added the sudoers file, remove it with `sudo rm /etc/sudoers.d/cc-askpass
 ## Development
 
 ```sh
-sh tests/askpass.sh                            # helper tests (Linux/WSL)
+sh tests/askpass.sh                            # helper tests (Linux, WSL, macOS)
 claude plugin validate . && claude plugin test .
 claude --plugin-dir .                          # run Claude Code with this checkout
 npx -p typescript tsc -p .                     # type-check (after one --plugin-dir run)
