@@ -129,13 +129,16 @@ POSIX sh. Never writes to stdout.
      `git-upload-archive`, `scp -t`, `scp -f`, `rsync --server` without `sudo`, `borg serve`,
      `sftp-server`, `internal-sftp`;
    - the host matches an `excludeHosts` pattern.
-3. Otherwise open a master: the real ssh with `-o ControlMaster=yes -o ControlPath=<ctl>
-   -o ControlPersist=no`, unless the caller gave `-S`/`-o ControlPath`, in which case that master
-   is reused and no new one is forced. `<ctl>` is a short path inside the session directory, or
-   in a fresh 0700 directory under `/tmp` when the session path would exceed the socket path
-   limit (104 bytes on macOS).
-4. Probe (§5.2). On failure, run the original command unwrapped over the master.
-5. On success run the wrapped command (§4.4) over the master with stdin, stdout and stderr
+3. Pass through as well when the real ssh is not a root-owned binary named `ssh`: a PATH the
+   model chose must not route the answer into a program of its own.
+4. Otherwise open a private master: the real ssh with `-o ControlMaster=yes
+   -o ControlPath=<ctl>`. A caller's own `-S`/`ControlPath` is never reused (a caller-supplied
+   socket can be a fake multiplexer that receives the answer). `<ctl>` is a short path inside
+   the session directory, or in a fresh 0700 directory under `/tmp` when the session path plus
+   OpenSSH's 17-byte temporary suffix would exceed the socket path limit (104 bytes on macOS).
+   A command too long to carry the bootstrap within one 128 KiB argument runs unwrapped.
+5. Probe (§5.2). On failure, run the original command unwrapped over the master.
+6. On success run the wrapped command (§4.4) over the master with stdin, stdout and stderr
    untouched, start the relay (§4.5) in the background, and exit with the remote command's
    status. On TERM/INT/HUP stop the master and the relay.
 
@@ -184,6 +187,12 @@ the previous hop, and so on to the user's machine.
   An empty answer makes the remote askpass exit 1.
 - The remote askpass fails at once, with a message, when `relay.pid` is missing or dead, as the
   local one does when `serve.pid` is dead.
+- The relay verifies each request on the remote host before relaying it, with the rules the mod
+  applies locally: the helper is the token directory's `askpass`, and its parent is sudo running
+  as root or a root-owned trusted client binary (`ssh`, `ssh-add`, `scp`, `sftp`,
+  `git-remote-http`; executable found through `/proc` or `lsof`, as `bin/exe-of` does, so
+  `exe-of` ships in the payload). Anything else gets an empty reply on the remote and never
+  reaches the pane, so a command Claude runs cannot call `$SUDO_ASKPASS` and read the answer.
 
 ### 4.6 Request line
 
@@ -210,8 +219,10 @@ ignores `<via>` and `<reported command>` unless the helper's parent is this plug
 ### 5.1 Verification
 
 A request from a helper whose parent is not sudo or a trusted client is accepted as remote when
-the parent's args run this plugin's `bin/shim/ssh` (path checked exactly as `isOurHelper`
-does). The host label comes from parsing that wrapper's own arguments (`parseSshTarget`), the
+the parent's args run this plugin's `bin/shim/ssh --relay <host>` (path checked exactly as
+`isOurHelper` does), the relay's own parent is the same wrapper in normal mode, and the host
+parsed from that parent's ssh arguments equals `<host>`. A `--relay` run by hand therefore does
+not pass. The host label comes from parsing that wrapper's own arguments (`parseSshTarget`), the
 command line Claude ran; text from the remote side never decides the host. For a further hop,
 the line's `<via>` (§4.6) names the chain (`db01 via server`); `server` is the verified label and
 `db01` is shown as reported by `server`.
@@ -264,8 +275,10 @@ Declared as `userConfig` in `plugin.json`:
 | Probe hangs or fails | Run unwrapped, as without the mod |
 | No usable remote base directory | Run the original command without askpass |
 | Relay channel refused (`MaxSessions`) | Remote askpass fails at once with a message |
-| Caller's own ControlPath (ansible) | Reuse it; do not open a second connection |
+| Caller's own ControlPath (ansible) | Ignored; a private master is opened (one extra connection) |
 | ControlPath too long | Use a short 0700 directory under `/tmp` |
+| Command too long for one argument with the bootstrap | Run unwrapped |
+| Real ssh is not a root-owned `ssh` binary | Pass through |
 | Bash tool timeout / interrupt | Wrapper stops master and relay; remote trap cleans up on HUP |
 | Connection drops mid-request | Remote askpass watchdog (10 min) ends; next bootstrap removes the stale directory |
 | Listener not running | No PATH prefix; a wrapper run anyway passes through |
@@ -276,9 +289,10 @@ Declared as `userConfig` in `plugin.json`:
 
 - Locally nothing changes: a request is shown only after `ps` shows it comes from this
   plugin's helper, started by sudo, a trusted client, or this plugin's ssh wrapper.
-- While a wrapped connection is open, any process running as the user's remote account can
-  raise a prompt. The design trusts that account on that host; it cannot verify the remote
-  process. The pane therefore names the host from local, verified data and labels everything
+- On the remote host the relay applies the local verification rules (§4.5), so commands Claude
+  runs cannot obtain an answer by calling askpass themselves. What remains trusted is the remote
+  account itself: a process already running there as the user can race for a reply, as a local
+  one can (original spec §7). The pane therefore names the host from local, verified data and labels everything
   else as reported by the host.
 - The token directory is 0700 and the socket permissions are sshd's (owner only), so other
   accounts on the remote host cannot raise prompts.
