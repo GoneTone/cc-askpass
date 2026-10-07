@@ -326,6 +326,93 @@ test_exe_of_names_a_live_process() {
   teardown
 }
 
+test_request_carries_via_and_reported() {
+  setup 'request carries via and reported'
+  start_serve s1
+  requests=0
+  CC_ASKPASS_VIA=db01 CC_ASKPASS_REPORTED="sudo  apt${tab}update" CC_ASKPASS_DIR=$dir "$askpass" 'Password: ' > "$tmp/helper.out" 2> /dev/null &
+  helper_pid=$!
+  wait_lines "$out" 2 || fail 'helper wrote no request'
+  request=$(sed -n 2p "$out")
+  [ "$request" = "$helper_pid${tab}Password: ${tab}db01${tab}sudo  apt update" ] || fail "request line: $request"
+  printf '\n' > "$dir/reply.$helper_pid"
+  wait "$helper_pid"
+  teardown
+}
+
+test_remote_mode_reports_parent() {
+  setup 'remote mode reports the parent command'
+  start_serve s1
+  # `; :` stops sh from exec'ing askpass, so the parent stays and is its PPID.
+  CC_ASKPASS_REMOTE=1 CC_ASKPASS_DIR=$dir sh -c '"$0" "Password: "; :' "$askpass" > /dev/null 2>&1 &
+  parent_pid=$!
+  if wait_lines "$out" 2; then
+    request=$(sed -n 2p "$out")
+    expected=$(ps -o args= -p "$parent_pid")
+    [ "$(printf '%s\n' "$request" | cut -f 4)" = "$expected" ] || fail "request line: $request (parent: $expected)"
+    printf '\n' > "$dir/reply.$(printf '%s\n' "$request" | cut -f 1)"
+  else
+    fail 'helper wrote no request'
+  fi
+  kill "$parent_pid" 2> /dev/null
+  wait "$parent_pid" 2> /dev/null
+  teardown
+}
+
+test_remote_mode_keeps_given_reported() {
+  setup 'remote mode keeps a given reported value'
+  start_serve s1
+  CC_ASKPASS_REMOTE=1 CC_ASKPASS_REPORTED='sudo ls' CC_ASKPASS_DIR=$dir "$askpass" 'Password: ' > /dev/null 2>&1 &
+  helper_pid=$!
+  wait_lines "$out" 2 || fail 'helper wrote no request'
+  request=$(sed -n 2p "$out")
+  [ "$request" = "$helper_pid${tab}Password: ${tab}${tab}sudo ls" ] || fail "request line: $request"
+  printf '\n' > "$dir/reply.$helper_pid"
+  wait "$helper_pid"
+  teardown
+}
+
+test_long_fields_fit_one_atomic_write() {
+  setup 'long prompt, via and reported fit one atomic FIFO write'
+  start_serve s1
+  long=$(printf '%05000d' 0)
+  CC_ASKPASS_VIA=$long CC_ASKPASS_REPORTED=$long CC_ASKPASS_DIR=$dir "$askpass" "$long" > /dev/null 2>&1 &
+  helper_pid=$!
+  wait_lines "$out" 2 || fail 'helper wrote no request'
+  bytes=$(sed -n 2p "$out" | wc -c)
+  [ "$bytes" -lt 4096 ] || fail "request is $bytes bytes"
+  printf '\n' > "$dir/reply.$helper_pid"
+  wait "$helper_pid"
+  teardown
+}
+
+test_relay_pid_counts_as_listener() {
+  setup 'a live relay.pid counts as the listener'
+  start_serve s1
+  stop_serve
+  rm -f "$dir/serve.pid"
+  sleep 30 &
+  relay=$!
+  printf '%s\n' "$relay" > "$dir/relay.pid"
+  CC_ASKPASS_DIR=$dir "$askpass" 'Password: ' > /dev/null 2>&1 &
+  helper_pid=$!
+  i=0
+  while [ ! -e "$dir/request.$helper_pid" ] && [ "$i" -lt 50 ]; do
+    i=$((i + 1))
+    sleep 0.1
+  done
+  [ -e "$dir/request.$helper_pid" ] || fail 'no request went out for a live relay'
+  kill "$helper_pid" 2> /dev/null
+  wait "$helper_pid" 2> /dev/null
+  kill "$relay"
+  wait "$relay" 2> /dev/null
+  with_timeout 5 env CC_ASKPASS_DIR="$dir" "$askpass" 'Password: ' > /dev/null 2> "$tmp/err"
+  status=$?
+  [ "$status" -eq 1 ] || fail "dead relay: exit $status"
+  grep -q 'listener is not running' "$tmp/err" || fail "dead relay message: $(cat "$tmp/err")"
+  teardown
+}
+
 test_serve_prints_ready
 test_serve_refuses_unsafe_session_ids
 test_serve_trims_trailing_slash
@@ -344,6 +431,11 @@ test_two_processes_resuming_one_session
 test_restarted_serve_resends_pending_requests
 test_restarted_serve_drops_dead_requests
 test_exe_of_names_a_live_process
+test_request_carries_via_and_reported
+test_remote_mode_reports_parent
+test_remote_mode_keeps_given_reported
+test_long_fields_fit_one_atomic_write
+test_relay_pid_counts_as_listener
 
 if [ "$failures" -eq 0 ]; then
   echo 'PASS: all askpass tests'
