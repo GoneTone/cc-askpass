@@ -15,7 +15,7 @@ cc-askpass 是一个 Claude Code mod，会在 Claude Code 里弹出密码面板�
 ## 要求
 
 - Claude Code 2.1.289 及以上
-- Linux、WSL 或 macOS（已在 macOS 14 测试）。不支持 Windows 原生版。
+- Linux、WSL 或 macOS（已在 macOS 14 和 26 测试）。不支持 Windows 原生版。
 
 ## 安装
 
