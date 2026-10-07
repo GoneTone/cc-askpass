@@ -2,15 +2,22 @@
 
 [English](README.md) | [繁體中文](README.zh-TW.md) | 简体中文
 
-Claude Code 的 Bash 工具执行命令时没有终端，所以命令需要 sudo 密码时，sudo 会直接放弃：
+**sudo 密码在 Claude Code 里输入，不用粘贴到对话中。**
+
+Claude 执行的命令需要密码时（`sudo apt install`、会调用 sudo 的安装脚本、通过 HTTPS 的 `git push`、带口令的 ssh 密钥），cc-askpass 会在 Claude Code 里弹出密码面板。你在面板里输入密码，密码会直接交给发起请求的程序，不会进入模型、对话记录或任何日志。
+
+没有它的话，Claude 的 Bash 工具没有终端，sudo 会直接失败：
 
 ```
 sudo: a terminal is required to read the password; either use the -S option ...
 ```
 
-cc-askpass 是一个 Claude Code mod，会在 Claude Code 里弹出密码面板来响应这些提示。密码直接交给 sudo，不会进入模型的 context。
+常见的变通方法都更糟：把密码粘贴到对话里让 Claude 用 `sudo -S`，密码就进了模型的 context；放弃并自己动手执行命令；或者在 sudoers 里配置 `NOPASSWD`。
 
-覆盖范围：sudo（包括脚本和安装程序里调用的 sudo）、ssh 密钥口令，以及通过 HTTPS 的 git 账号密码。
+- **无需配置。** 装好之后，sudo、ssh 和 git 需要密码时就会直接询问你。
+- **密码不经过模型。** 密码从面板经由私有的 FIFO 送到发起请求的进程，不会出现在模型的 context、日志、命令行或任何文件里。
+- **看得到你在批准什么。** 面板会显示将以 root 执行的完整命令，以及 Claude 为此执行了哪条命令。
+- **只接受真实的请求。** 每个请求都必须来自 sudo 或真正的 ssh/git 可执行文件，其他一律拒绝。
 
 ## 要求
 

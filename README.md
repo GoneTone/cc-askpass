@@ -2,15 +2,22 @@
 
 English | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md)
 
-Claude Code's Bash tool runs commands without a terminal, so when one of them needs your sudo password, sudo gives up:
+**Type your sudo password into Claude Code, not into the chat.**
+
+When a command Claude runs needs a password (`sudo apt install`, an install script that calls sudo, `git push` over HTTPS, an ssh key with a passphrase), cc-askpass opens a password pane inside Claude Code. You type the password there, and it goes straight to the program that asked. It never reaches the model, the transcript or any log.
+
+Without it, Claude's Bash tool has no terminal, so sudo fails at once:
 
 ```
 sudo: a terminal is required to read the password; either use the -S option ...
 ```
 
-cc-askpass is a Claude Code mod that answers those prompts with a password pane inside Claude Code. The password goes straight to sudo and never enters the model's context.
+The usual ways around that are worse: pasting the password into the chat for `sudo -S`, which puts it in the model's context; giving up and running the command yourself; or `NOPASSWD` in sudoers.
 
-It covers sudo (including sudo called from scripts and installers), ssh key passphrases, and git credentials over HTTPS.
+- **Nothing to configure.** Install it, and sudo, ssh and git simply ask.
+- **The password stays out of the model.** It travels from the pane to the asking process through a private FIFO, never through the model's context, logs, the command line or a file.
+- **You see what you are approving.** The pane shows the exact command that will run as root, and the command Claude ran to get there.
+- **Only real requests get through.** Each request must come from sudo or a genuine ssh/git binary; anything else is rejected.
 
 ## Requirements
 
