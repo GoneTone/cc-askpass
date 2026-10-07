@@ -1,5 +1,6 @@
 #!/bin/sh
-# cc-askpass ssh wrapper. Found before the real ssh on PATH inside Claude's Bash commands.
+# cc-askpass ssh wrapper
+# Found before the real ssh on PATH inside Claude's Bash commands.
 # It decides whether a password prompt on the remote host should reach the cc-askpass pane;
 # when not, it runs the real ssh with the original arguments. It never writes to stdout.
 
@@ -8,27 +9,25 @@ me=cc-askpass
 # Option letters of ssh that take an argument.
 arg_opts=bceilmopBDEFIJLOPQRSwW
 
-# find_real_ssh: set real_ssh to the first ssh on PATH that is not this wrapper.
+# find_real_ssh: set real_ssh to the first ssh on PATH that is not a cc-askpass wrapper
+# (this one, or another plugin root's copy: two wrappers would exec each other forever).
 find_real_ssh() {
-  case $0 in
-    */*) self_dir=${0%/*} ;;
-    *) self_dir=. ;;
-  esac
-  self_dir=$(cd "$self_dir" && pwd -P)
-  # Builtins only: PATH may be nothing but the shim directory.
-  rest=
+  real_ssh=
   oldifs=$IFS
   IFS=:
+  set -f
   for entry in $PATH; do
-    [ -n "$entry" ] || continue
-    here=$(cd "$entry" 2> /dev/null && pwd -P)
-    [ "$here" = "$self_dir" ] || rest="$rest${rest:+:}$entry"
+    # An empty entry means the current directory: never run ssh from there.
+    [ -n "$entry" ] && [ -f "$entry/ssh" ] && [ -x "$entry/ssh" ] || continue
+    line1= line2=
+    { IFS= read -r line1 && IFS= read -r line2; } < "$entry/ssh" 2> /dev/null
+    [ "$line2" = '# cc-askpass ssh wrapper' ] && continue
+    real_ssh=$entry/ssh
+    break
   done
+  set +f
   IFS=$oldifs
-  # An empty PATH would search the current directory.
-  real_ssh=
-  [ -z "$rest" ] || real_ssh=$(PATH=$rest command -v ssh)
-  if [ -z "$real_ssh" ] || [ "$real_ssh" -ef "$self_dir/ssh" ]; then
+  if [ -z "$real_ssh" ]; then
     echo "$me: the ssh wrapper found only itself on PATH" >&2
     exit 255
   fi
@@ -50,31 +49,20 @@ quote() {
   quoted="'$quoted$rest_word'"
 }
 
-# set_ctl VALUE: ssh uses the first ControlPath it sees.
-set_ctl() {
-  [ -n "$caller_ctl" ] || caller_ctl=$1
-}
-
-# parse_args ARGS...: split ssh's arguments into opts (option words, quoted for
-# `eval "set -- $opts"`), host, command, pass_flag, tty_opts and caller_ctl.
-parse_args() {
-  opts=
-  host=
-  command=
-  pass_flag=
-  tty_opts=
-  caller_ctl=
+# parse_opts ARGS...: run getopts over the leading options of ARGS, appending to opts and the
+# flags; set consumed to the number of words used and ended to 1 when `--` was among them.
+parse_opts() {
   OPTIND=1
-  while getopts '1246ab:c:e:fgi:kl:m:no:p:qstvxAB:CD:E:F:GI:J:KL:MNO:P:Q:R:S:TVw:W:XYy' opt; do
+  while getopts ':1246ab:c:e:fgi:kl:m:no:p:qstvxAB:CD:E:F:GI:J:KL:MNO:P:Q:R:S:TVw:W:XYy' opt; do
     case $opt in
-      '?')
+      '?' | ':')
         # ssh rejects it with its own message.
         pass_flag=1
         continue
         ;;
       N | W | O | s | G | V | Q | f) pass_flag=1 ;;
       t) tty_opts="$tty_opts${tty_opts:+ }-t" ;;
-      S) set_ctl "$OPTARG" ;;
+      S) s_ctl=$OPTARG ;;
       o)
         # "Key=value", "Key value" or "Key = value"; keys are case-insensitive.
         key=${OPTARG%%[=' ']*}
@@ -83,7 +71,7 @@ parse_args() {
         value=${value#=}
         value=${value#"${value%%[! ]*}"}
         case $key in
-          [Cc][Oo][Nn][Tt][Rr][Oo][Ll][Pp][Aa][Tt][Hh]) set_ctl "$value" ;;
+          [Cc][Oo][Nn][Tt][Rr][Oo][Ll][Pp][Aa][Tt][Hh]) [ -n "$o_ctl" ] || o_ctl=$value ;;
         esac
         ;;
     esac
@@ -96,9 +84,37 @@ parse_args() {
         ;;
     esac
   done
-  shift $((OPTIND - 1))
+  consumed=$((OPTIND - 1))
+  ended=
+  i=0
+  for word in "$@"; do
+    i=$((i + 1))
+    [ "$i" -eq "$consumed" ] && [ "$word" = -- ] && ended=1
+  done
+}
+
+# parse_args ARGS...: split ssh's arguments into opts (option words, quoted for
+# `eval "set -- $opts"`), host, command, pass_flag, tty_opts and caller_ctl.
+# Like ssh, options after the host are options too, unless `--` came first.
+parse_args() {
+  opts=
+  host=
+  command=
+  pass_flag=
+  tty_opts=
+  s_ctl=
+  o_ctl=
+  parse_opts "$@"
+  shift "$consumed"
   host=${1:-}
   [ $# -eq 0 ] || shift
+  while [ -z "$ended" ]; do
+    case ${1:-} in -?*) ;; *) break ;; esac
+    parse_opts "$@"
+    shift "$consumed"
+  done
+  # -S replaces earlier values (the last wins and beats -o); of -o ControlPath the first wins.
+  caller_ctl=${s_ctl:-$o_ctl}
   command="$*"
 }
 
@@ -140,8 +156,17 @@ is_protocol_command() {
 # is_excluded: host (without ssh://, user@ and :port) matches a CC_ASKPASS_EXCLUDE glob.
 is_excluded() {
   name=${host#ssh://}
+  is_url=1
+  [ "$name" != "$host" ] || is_url=
   name=${name##*@}
-  name=${name%:*}
+  # The port, but a bare IPv6 address (several colons) stays whole.
+  case $name in
+    *:*)
+      if [ -n "$is_url" ] || case ${name#*:} in *:*) false ;; esac; then
+        name=${name%:*}
+      fi
+      ;;
+  esac
   while IFS= read -r glob; do
     [ -n "$glob" ] || continue
     # shellcheck disable=SC2254
