@@ -266,11 +266,27 @@ async function bashWorld($: any, on: any) {
     ran.push(e.command)
     return { result: { stdout: '', stderr: '', interrupted: false }, text: '' } as never
   })
+  // Stands in for the engine's permission decision: a rule allows exactly `git status`. With
+  // `preToolUseDeny`, a PreToolUse hook denies any command still carrying the shim prefix.
+  const checked: string[] = []
+  let preToolUseDeny = false
+  on('tool.check', (_$: unknown, e: { input: { command: string } }) => {
+    checked.push(e.input.command)
+    if (preToolUseDeny && e.input.command.includes('/bin/shim')) return { decision: 'deny', hook: 'PreToolUse' } as never
+    return (e.input.command === 'git status' ? { decision: 'allow', rule: 'Bash(git status)' } : { decision: 'ask' }) as never
+  })
   await $.session.start(START)
   await clock.settle()
   return {
     rec,
     ran,
+    checked,
+    denyInPreToolUse() {
+      preToolUseDeny = true
+    },
+    async check(command: string) {
+      return $.tool.check({ tool: 'Bash', input: { command } })
+    },
     async ready() {
       serve.emit(`ready\t${SESSION_DIR}\n`)
       await clock.settle()
@@ -282,7 +298,7 @@ async function bashWorld($: any, on: any) {
     },
     async bash(command: string) {
       await $.tool.call({ tool: 'Bash', command } as never)
-      return ran.at(-1)
+      return ran.at(-1) ?? ''
     },
   }
 }
@@ -325,6 +341,43 @@ test('the sudo note leaves out ssh with remoteHosts off', { options: { remoteHos
   const text = (await sudoNote($))?.text ?? ''
   expect(text).toContain('Do not add `-n` or `-S`')
   expect(text).not.toContain('ssh host sudo')
+})
+
+test('permission rules see the command without the prefix', async ($, on) => {
+  const w = await bashWorld($, on)
+  await w.ready()
+  const ran = await w.bash('git status')
+  expect(ran).not.toBe('git status')
+  const verdict = await w.check(ran)
+  expect(verdict.decision).toBe('allow')
+  expect(verdict.rule).toBe('Bash(git status)')
+  expect(w.checked.at(-1)).toBe('git status')
+  expect((await w.check(await w.bash('git push'))).decision).toBe('ask')
+  expect(w.checked.at(-1)).toBe('git push')
+})
+
+test('a command without the prefix is checked as it is', async ($, on) => {
+  const w = await bashWorld($, on)
+  await w.ready()
+  expect((await w.check('git status')).decision).toBe('allow')
+  expect((await w.check('echo x')).decision).toBe('ask')
+  expect(w.checked).toEqual(['git status', 'echo x'])
+})
+
+test('a PreToolUse decision on the prefixed command stands', async ($, on) => {
+  const w = await bashWorld($, on)
+  await w.ready()
+  w.denyInPreToolUse()
+  expect(await w.check(await w.bash('git status'))).toEqual({ decision: 'deny', hook: 'PreToolUse' })
+})
+
+test('with the listener down, checks are unchanged', async ($, on) => {
+  const w = await bashWorld($, on)
+  expect((await w.check(await w.bash('git status'))).decision).toBe('allow')
+  await w.ready()
+  await w.stop()
+  expect((await w.check(await w.bash('git status'))).decision).toBe('allow')
+  expect(w.checked).toEqual(['git status', 'git status'])
 })
 
 test('CC_ASKPASS_EXCLUDE is empty by default', async ($, on) => {

@@ -114,15 +114,28 @@ prefix runs after the snapshot, so child processes (rsync, git, ansible, scripts
 The command recorded for the "Claude ran" line stays the original one. With the listener down
 or the remote feature turned off, no prefix is added.
 
+`tool.check` fires after `tool.call` with the rewritten command, so a `tool.check` hook takes the
+prefix off again: for a command that starts with exactly this prefix it runs the engine's own
+check (`next`) and, unless a PreToolUse hook decided there, answers with
+`$.tool.check({ tool: 'Bash', input: { ...input, command: <without the prefix> } })`. Permission
+rules (`Bash(git status)`) therefore match the command Claude wrote; the query skips the calling
+hook's own frame, so it cannot loop. PreToolUse hooks and the auto-mode classifier still see the
+prefixed command.
+
 ### 4.3 `bin/shim/ssh`
 
 POSIX sh. Never writes to stdout.
 
-1. Find the real ssh: PATH without the shim directory, then `command -v ssh`. If that resolves
-   to the wrapper itself, print an error to stderr and exit 255.
+1. Find the real ssh: the first `ssh` on PATH that is not a cc-askpass wrapper (any plugin
+   root's copy, known by its second line). If there is none, print an error to stderr and exit
+   255.
 2. Pass through (`exec` the real ssh with the original arguments) when:
-   - `CC_ASKPASS_DIR` or `SSH_ASKPASS` is unset, or the listener behind `CC_ASKPASS_DIR` is not
-     running (`serve.pid` locally, `relay.pid` on a remote hop; same check as `bin/askpass`);
+   - `CC_ASKPASS_DIR` is unset, or the listener behind it is not running (`serve.pid` locally,
+     `relay.pid` on a remote hop; same check as `bin/askpass`);
+   - `SSH_ASKPASS` is not the `askpass` beside the wrapper (`bin/askpass` locally, the token
+     directory's on a remote hop), the one the relay asks (§4.5);
+   - an option word up to and including the host has a blank in it (`-o "User alice"`): the mod
+     reads the host back from `ps`, which joins the arguments with spaces;
    - there is no remote command (interactive login);
    - any of `-N -W -O -s -G -V -Q` is given;
    - the remote command is a protocol command: `git-upload-pack`, `git-receive-pack`,
@@ -132,7 +145,7 @@ POSIX sh. Never writes to stdout.
 3. Pass through as well when the real ssh is not a root-owned binary named `ssh`: a PATH the
    model chose must not route the answer into a program of its own.
 4. Otherwise open a private master: the real ssh with `-o ControlMaster=yes
-   -o ControlPath=<ctl>`. A caller's own `-S`/`ControlPath` is never reused (a caller-supplied
+   -o ControlPath=<ctl> -o ControlPersist=10 -N -f`. A caller's own `-S`/`ControlPath` is never reused (a caller-supplied
    socket can be a fake multiplexer that receives the answer). `<ctl>` is a short path inside
    the session directory, or in a fresh 0700 directory under `/tmp` when the session path plus
    OpenSSH's 17-byte temporary suffix would exceed the socket path limit (104 bytes on macOS).
@@ -144,11 +157,16 @@ POSIX sh. Never writes to stdout.
 
 ### 4.4 Remote bootstrap
 
-The wrapper sends one command line that works in any login shell, fish included:
+The wrapper sends one command line that works in any login shell, fish included. It holds only
+base64, plain words and the single-quoted eval:
 
 ```
-env CCAP_TOKEN=<token> CCAP_B64=<base64 of bin/remote.sh + original command> /bin/sh -c 'eval "$(printf %s "$CCAP_B64" | base64 -d 2>/dev/null || printf %s "$CCAP_B64" | base64 -D)"'
+env CCAP_TOKEN=<token> CCAP_ASKPASS_B64=<bin/askpass> CCAP_SSH_B64=<bin/shim/ssh> CCAP_EXE_B64=<bin/exe-of> CCAP_CMD_B64=<original command> CCAP_RS_B64=<bin/remote.sh> /bin/sh -c 'eval "$(printf %s "$CCAP_RS_B64" | base64 -d 2>/dev/null || printf %s "$CCAP_RS_B64" | base64 -D)"'
 ```
+
+(each `*_B64` the base64 of what it names). The relay, reply and stop sessions send the same
+line with `CCAP_RS_B64` only, followed by ` _ relay <token>`, ` _ reply <token> <pid>` or
+` _ stop <token>`.
 
 `bin/remote.sh` then:
 
@@ -165,7 +183,8 @@ env CCAP_TOKEN=<token> CCAP_B64=<base64 of bin/remote.sh + original command> /bi
    behaviour without the mod.
 
 The remote `sudo` wrapper finds the real sudo the same way as the ssh wrapper and adds `-A`
-unless `-A`, `-S`, `-n` (or long forms) are present. With `-A`, sudo uses askpass even under
+unless `-A`, `-S`, `-n` (or long forms) are present among its options; the value of an option
+that takes one (`-u root`, `--user root`, `--prompt x` …) is skipped, not taken for the command. With `-A`, sudo uses askpass even under
 `ssh -tt`. Calls to `/usr/bin/sudo` by absolute path skip the wrapper; they have no terminal
 in the non-`-t` case and still find `SUDO_ASKPASS`.
 
@@ -183,13 +202,15 @@ the previous hop, and so on to the user's machine.
 - Every session the wrapper opens over its master besides the command itself (probe, relay,
   reply) runs with `-F /dev/null -o BatchMode=yes -o ProxyCommand=false`, so a missing socket
   fails instead of opening a new connection somewhere else.
-- For each line the wrapper runs `"$SSH_ASKPASS" "<prompt>"` with `CC_ASKPASS_VIA` and
-  `CC_ASKPASS_REPORTED` set from the line (§4.6). `SSH_ASKPASS` is `bin/askpass` locally (set by
-  the mod) and the token directory's `askpass` on a remote hop (set by the bootstrap), so the
-  same wrapper works at every hop. Locally the mod then sees a helper whose parent is
-  `bin/shim/ssh` (§5.1).
-- Reply channel: `ssh -S <ctl> host 'cat > <token dir>/reply.<pid>'` with the answer on stdin
-  (the reply FIFO path is checked on the remote the same way `REPLY_SCRIPT` checks it locally).
+- For each line the wrapper's `--relay` process execs the `askpass` beside the wrapper
+  (`bin/askpass` locally, the token directory's `askpass` on a remote hop), never
+  `"$SSH_ASKPASS"`, with `CC_ASKPASS_VIA` and `CC_ASKPASS_REPORTED` set from the line (§4.6), so
+  the same wrapper works at every hop. The wrapper wraps only when `SSH_ASKPASS` names that same
+  askpass (§4.3). Locally the mod then sees a helper whose parent is `bin/shim/ssh --relay`
+  (§5.1).
+- Reply channel: `remote.sh reply <token> <pid>` over the master with the answer on stdin: it
+  copies stdin into `<token dir>/reply.<pid>`, the FIFO checked on the remote the same way
+  `REPLY_SCRIPT` checks it locally.
   An empty answer makes the remote askpass exit 1.
 - The remote askpass fails at once, with a message, when `relay.pid` is missing or dead, as the
   local one does when `serve.pid` is dead.
@@ -243,8 +264,8 @@ ssh -S <ctl> host 'command -v mkfifo >/dev/null && command -v base64 >/dev/null 
 
 stdin `/dev/null`, 5 s timeout. Anything but the exact line counts as failure. A forced command
 (git hosting, gitolite, backup servers), a network device, Windows sshd or a host without these
-tools fails the probe, and the original command runs unwrapped. The result is cached per
-`<ctl>` for the life of the master.
+tools fails the probe, and the original command runs unwrapped. Every wrapped command probes
+once, over its own new master.
 
 ### 5.3 Pane
 
@@ -258,8 +279,9 @@ tools fails the probe, and the original command runs unwrapped. The result is ca
   still sits under the remote heading.
 - Masking: every remote prompt is masked except git's `Username for '…'` and ssh's
   `(yes/no…)`, as locally.
-- Retry hint: a second request from the same remote pid on the same host shows
-  "Sorry, try again".
+- Retry hint: for a remote sudo only (the reported command's first word), a second request
+  with the same host, relay (one per ssh command), reported command and prompt shows
+  "Sorry, try again". The remote helper's pid is new on every ask, so it is not part of the key.
 
 ### 5.4 System prompt note
 
@@ -283,11 +305,11 @@ Declared as `userConfig` in `plugin.json`:
 | Probe hangs or fails | Run unwrapped, as without the mod |
 | No usable remote base directory | Run the original command without askpass |
 | Relay channel refused (`MaxSessions`) | Remote askpass fails at once with a message |
-| Caller's own ControlPath (ansible) | Ignored; a private master is opened (one extra connection) |
+| Caller's own ControlPath (ansible), `ControlMaster` in `~/.ssh/config` | Ignored; a private master is opened (one extra connection, and a new login per command) |
 | ControlPath too long | Use a short 0700 directory under `/tmp` |
 | Command too long for one argument with the bootstrap | Run unwrapped |
 | Real ssh is not a root-owned `ssh` binary | Pass through |
-| Bash tool timeout / interrupt | Wrapper stops master and relay; remote trap cleans up on HUP |
+| Bash tool timeout / interrupt | On TERM/INT/HUP the wrapper stops the remote command, master and relay; remote trap cleans up on HUP. Claude Code sends KILL 5 s after TERM: a SIGKILLed wrapper stops nothing, and `ControlPersist=10` ends its master 10 s after its last session closes (the remote command, still running, keeps it until it ends) |
 | Connection drops mid-request | Remote askpass watchdog (10 min) ends; next bootstrap removes the stale directory |
 | Listener not running | No PATH prefix; a wrapper run anyway passes through |
 | Real ssh resolves to the wrapper | Error on stderr, exit 255 |

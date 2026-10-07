@@ -254,6 +254,13 @@ t_askpass= expect_decision no h sudo true
 t_askpass=/x expect_decision no h sudo true
 expect_decision no -N h sudo true
 expect_decision no h -N -L 1:a:2
+# ps joins the arguments with spaces: the mod would misread a blank up to the host.
+expect_decision no -o 'User alice' h sudo true
+expect_decision no '-oUser alice' h sudo true
+expect_decision no -o "$(printf 'User\talice')" h sudo true
+expect_decision no 'alice smith@h' sudo true
+expect_decision wrap -o User=alice h sudo true
+expect_decision wrap h -o 'User alice' sudo true
 
 expect_parse 'h|cmd|-t|-t -p 22|-p 22|' -tp22 h cmd
 expect_parse 'h|a b||-p 2|-p 2|' -o ControlPath=/c -p 2 h a b
@@ -423,6 +430,27 @@ cp "$root/bin/remote.sh" "$tmp/"
 )
 printf '%s\n' 'Password: |h|sudo true|' 'Q|db01 via h|ls|' | cmp -s - "$tmp/asked" || fail "asked: $(cat "$tmp/asked")"
 printf '%s\n' '12|pw' '15|pw' | cmp -s - "$tmp/sent" || fail "sent: $(cat "$tmp/sent")"
+teardown
+
+# The remote sudo wrapper adds -A unless the caller chose how sudo gets the password; the
+# value of an option is not the command.
+setup 'sudo wrapper options'
+mkdir "$tmp/real"
+(
+  CCAP_RS_LIB=1
+  . "$root/bin/remote.sh"
+  sudo_wrapper
+) > "$tmp/dir/sudo"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/sudo.args"\n' "$tmp" > "$tmp/real/sudo"
+chmod +x "$tmp/dir/sudo" "$tmp/real/sudo"
+for args in 'true' '-S true' '-u root -S true' '--user root -S true' '--user=root -n true' \
+  '--user root true' '--prompt x --chdir / -A true' '-uroot true'; do
+  # shellcheck disable=SC2086
+  env PATH="$tmp/dir:$tmp/real:$PATH" "$tmp/dir/sudo" $args
+done
+printf '%s\n' '-A true' '-S true' '-u root -S true' '--user root -S true' '--user=root -n true' \
+  '-A --user root true' '--prompt x --chdir / -A true' '-A -uroot true' | cmp -s - "$tmp/sudo.args" ||
+  fail "sudo got: $(cat "$tmp/sudo.args")"
 teardown
 
 # ---- End to end: the wrapper against sshds of our own on 127.0.0.1, as this user ----
@@ -744,6 +772,30 @@ run_e2e() {
   pkill -f "$wrapper --relay"
   e2e_done
 
+  e2e_test 'master ends after the wrapper is killed outright'
+  before=$(remote_dirs)
+  # In a process group of its own, killed whole as Claude Code's KILL after a timeout does.
+  perl -e 'setpgrp(0, 0); exec @ARGV or exit 127' env PATH="$shimdir:$PATH" CC_ASKPASS_DIR="$ldir" \
+    SSH_ASKPASS="$askpass" ssh -F "$cfg" localhost 'sleep 33' &
+  killed=$!
+  i=0
+  until pgrep -f "^sleep 33$" > /dev/null || [ "$i" -gt 100 ]; do
+    i=$((i + 1))
+    sleep 0.1
+  done
+  kill -KILL -"$killed"
+  wait "$killed" 2> /dev/null
+  # The remote command ends on its own later; its master must not outlive it by more than 10 s.
+  pkill -f "^sleep 33$"
+  i=0
+  while masters > /dev/null && [ "$i" -lt 150 ]; do
+    i=$((i + 1))
+    sleep 0.1
+  done
+  masters > /dev/null && fail "master still running after 15 s: $(masters)"
+  gone eval '[ "$(remote_dirs)" != "$before" ]' || fail "token directory left: $(remote_dirs)"
+  e2e_done
+
   e2e_test 'no usable base directory'
   out=$(CCAP_TEST_BASES=/nonexistent wssh -F "$cfg" localhost 'echo ran; echo "${SUDO_ASKPASS:-unset}"')
   [ "$out" = "$(printf 'ran\nunset')" ] || fail "out: $out"
@@ -780,6 +832,7 @@ ssh-keygen -q -t ed25519 -N test-pw -f "$e2e/pw_key"
 test_login_shells
 if [ ! -x "$sshd" ]; then
   echo 'SKIP: no usable sshd'
+  echo "::warning::ssh end-to-end tests skipped: no usable sshd"
 elif start_sshd "$e2e/a" && start_sshd "$e2e/forced" 'ForceCommand /bin/echo forced'; then
   run_e2e
 elif [ "$(uname)" = Linux ]; then
@@ -787,6 +840,8 @@ elif [ "$(uname)" = Linux ]; then
   fail "$(cat "$e2e"/*/sshd.log 2> /dev/null)"
 else
   echo 'SKIP: no usable sshd'
+  cat "$e2e"/*/sshd.log 2> /dev/null
+  echo "::warning::ssh end-to-end tests skipped: no usable sshd"
 fi
 stop_sshd "$e2e/a"
 stop_sshd "$e2e/forced"

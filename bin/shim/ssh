@@ -98,7 +98,8 @@ parse_opts() {
 
 # parse_args ARGS...: split ssh's arguments into opts (option words, quoted for
 # `eval "set -- $opts"`; session_opts without -S, -M, ControlPath and ControlMaster, and
-# master_opts also without -t/-T), host, command, pass_flag and tty_opts.
+# master_opts also without -t/-T), host, command, pass_flag, tty_opts and spaced (a blank in
+# a word up to the host).
 # Like ssh, options after the host are options too, unless `--` came first.
 parse_args() {
   opts=
@@ -109,6 +110,15 @@ parse_args() {
   pass_flag=
   tty_opts=
   parse_opts "$@"
+  # The mod reads the host back from ps, which joins the arguments with spaces: a word up to
+  # the host with a blank in it (`-o "User alice"`) would be misread there.
+  spaced=
+  i=0
+  for word in "$@"; do
+    i=$((i + 1))
+    [ "$i" -le $((consumed + 1)) ] || break
+    case $word in *[[:space:]]*) spaced=1 ;; esac
+  done
   shift "$consumed"
   host=${1:-}
   [ $# -eq 0 ] || shift
@@ -191,6 +201,7 @@ should_wrap() {
   [ "${SSH_ASKPASS:-}" = "$lib/askpass" ] || return 1
   [ -n "$command" ] || return 1
   [ -z "$pass_flag" ] || return 1
+  [ -z "$spaced" ] || return 1
   is_protocol_command && return 1
   is_excluded && return 1
   # The name goes into the relay's args and the request lines, where the mod checks it.
@@ -265,10 +276,12 @@ choose_ctl() {
   fi
 }
 
+# start_master: our master, in the background. A wrapper killed outright (SIGKILL) cannot stop
+# it: ControlPersist ends it 10 s after its last session went.
 start_master() {
   eval "set -- $master_opts"
   rm -f "$ctl"
-  PATH=$user_path "$real_ssh" "$@" -o ControlMaster=yes -S "$ctl" -o ControlPersist=yes -N -f "$host" < /dev/null > /dev/null
+  PATH=$user_path "$real_ssh" "$@" -o ControlMaster=yes -S "$ctl" -o ControlPersist=10 -N -f "$host" < /dev/null > /dev/null
 }
 
 # start_session REMOTE_COMMAND: the user's session over the master, stdin on fd 3.

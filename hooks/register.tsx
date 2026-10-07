@@ -141,13 +141,12 @@ async function verify($: EngineInterface, line: string): Promise<void> {
 
   if (!requester.isSudo) {
     const host = relayHost(requester.command, `${$.plugin.root}/bin/shim/ssh`)
+    const isGenuine = host === null ? await isTrustedCaller($, requester) : await isWrapperRelay($, requester.pid, host)
     // With remote prompts off no relay is taken, whoever started it.
-    const isAllowed =
-      host === null ? await isTrustedCaller($, requester) : isRemoteOn && (await isWrapperRelay($, requester.pid, host))
-    if (!isAllowed) {
+    if (!isGenuine || (host !== null && !isRemoteOn)) {
       // The helper is ours: an empty answer makes it fail at once instead of waiting.
       $.ui.toast(`Rejected askpass request from ${requester.comm} (pid ${requester.pid})`)
-      log($, `rejected request from untrusted caller: ${requester.command}`)
+      log($, isGenuine ? 'rejected a remote request: remoteHosts is off' : `rejected request from untrusted caller: ${requester.command}`)
       return reply($, request.helperPid, '')
     }
     if (host !== null) {
@@ -528,6 +527,19 @@ export const register: Register = (on, options) => {
     if (recentBashCommands.length > RECENT_BASH_LIMIT) recentBashCommands.shift()
     if (!isListening || !isRemoteOn) return next(e)
     return next({ ...e, command: pathPrefix($.plugin.root) + e.command })
+  })
+
+  // tool.check sees the command tool.call passed on: permission rules (`Bash(git status)`) are
+  // matched against the command Claude wrote, without our prefix.
+  on('tool.check', { tool: 'Bash' }, async ($, e, next) => {
+    const prefix = pathPrefix($.plugin.root)
+    const input = (e.input ?? {}) as { command?: unknown }
+    if (typeof input.command !== 'string' || !input.command.startsWith(prefix)) return next(e)
+    const verdict = await next(e)
+    // A PreToolUse hook decided on the prefixed command; a query asks none, so its word stands.
+    if (verdict.hook !== undefined) return verdict
+    // The query skips this hook's own frame: no loop.
+    return $.tool.check({ tool: 'Bash', input: { ...input, command: input.command.slice(prefix.length) } })
   })
 
   on('session.end', async ($, e, next) => {

@@ -716,6 +716,8 @@ test('rejects relayed requests with remoteHosts off', { options: { remoteHosts: 
   expect(w.rec.opens).toEqual([])
   expect(w.rec.toasts.filter(text => text.includes('Rejected askpass request'))).toHaveLength(1)
   expect(w.replies().map(reply => reply.stdin)).toEqual(['\n'])
+  // A genuine relay: the log says why, not that the caller is untrusted.
+  expect(w.rec.logs).toContain('cc-askpass: rejected a remote request: remoteHosts is off')
 })
 
 test('a remote username then password is no retry', async ($, on) => {

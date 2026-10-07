@@ -51,13 +51,13 @@ Password prompts on other hosts reached with ssh get the same pane:
 
 - `ssh host sudo apt update`, and sudo inside a remote script (`ssh host ./deploy.sh`).
 - Further hops: `ssh` run from the remote host to a third one.
-- rsync, ansible and scripts that call ssh.
+- rsync, ansible and scripts that call ssh. A remote sudo given `-S` or `-n` (as ansible's become does) is left alone, so it does not reach the pane.
 
 Hosts that cannot take part are detected and left untouched automatically, so ssh behaves as it would without cc-askpass: git hosting (`git@github.com`), network devices, accounts with a forced command, Windows sshd, and hosts without `/bin/sh`.
 
 The pane names the host (`sudo on server needs your password`), labels the `$` line `(reported by server)`, and for remote prompts always shows the `Claude ran:` line plus a warning to check it before you answer.
 
-On your own machine, the `ssh` found on PATH must be a root-owned binary (for example `/usr/bin/ssh`); otherwise ssh runs unchanged and there are no remote prompts. A caller's own `ControlPath` or `-S` is not reused, so tools such as ansible open one extra connection.
+On your own machine, the `ssh` found on PATH must be a root-owned binary (for example `/usr/bin/ssh`); otherwise ssh runs unchanged and there are no remote prompts. A caller's own `ControlPath` or `-S` is not reused, so tools such as ansible open one extra connection. Nor is a `ControlMaster`/`ControlPersist` in your own `~/.ssh/config`: every ssh command cc-askpass handles opens its own connection, so a host with password or two-factor login asks for it on every command; add such hosts to `excludeHosts`. Each such command also starts a few extra login shells on the host (the check, the relay, one per answer).
 
 Two options, set in `/config` or in settings:
 
@@ -109,6 +109,9 @@ For ssh, the mod also puts a small `ssh` wrapper first on the PATH of the comman
 - A Windows sshd as the remote host is left untouched (no remote prompts).
 - `/usr/bin/sudo` called by absolute path under `ssh -t` reads the terminal instead of asking.
 - A user-installed (not root-owned) ssh means no remote prompts.
+- A login rc file on the remote host that prints to stdout makes the check fail, and the command runs without remote prompts.
+- An ssh option value or host with a space in it (`-o "User alice"`) means no remote prompts for that command; write `-o User=alice` instead.
+- While the listener runs, PreToolUse hooks and the auto-mode classifier see Bash commands with the `export PATH='…/bin/shim':"$PATH"; ` prefix; permission rules are matched against the original command.
 
 ## Uninstall
 

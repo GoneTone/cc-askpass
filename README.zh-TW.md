@@ -51,13 +51,13 @@ claude plugin install cc-askpass@cc-askpass
 
 - `ssh host sudo apt update`，以及遠端腳本裡的 sudo（`ssh host ./deploy.sh`）。
 - 再往下跳：從遠端主機再 `ssh` 到第三台。
-- rsync、ansible 和會呼叫 ssh 的腳本。
+- rsync、ansible 和會呼叫 ssh 的腳本。帶有 `-S` 或 `-n` 的遠端 sudo（例如 ansible 的 become）則原封不動放行，不會出現在面板上。
 
 無法參與的主機會被自動偵測並原封不動放行，ssh 的行為和沒裝 cc-askpass 時一樣：git 代管服務（`git@github.com`）、網路設備、設有 forced command 的帳號、Windows sshd，以及沒有 `/bin/sh` 的主機。
 
 面板會標出主機名稱（`sudo on server needs your password`），在 `$` 那行後面加上 `(reported by server)`，而且遠端提示一律顯示 `Claude ran:` 那行，外加一則警告，請你回答前先確認。
 
-在你自己的機器上，PATH 裡找到的 `ssh` 必須是屬於 root 的執行檔（例如 `/usr/bin/ssh`），否則 ssh 照常執行，不會有遠端提示。呼叫端自己指定的 `ControlPath` 或 `-S` 不會被沿用，所以像 ansible 這類工具會多開一條連線。
+在你自己的機器上，PATH 裡找到的 `ssh` 必須是屬於 root 的執行檔（例如 `/usr/bin/ssh`），否則 ssh 照常執行，不會有遠端提示。呼叫端自己指定的 `ControlPath` 或 `-S` 不會被沿用，所以像 ansible 這類工具會多開一條連線。你自己 `~/.ssh/config` 裡的 `ControlMaster`/`ControlPersist` 也不會被沿用：經 cc-askpass 處理的每個 ssh 指令都會開自己的連線，所以需要密碼或雙重驗證才能登入的主機，每個指令都會再問一次；這類主機請加進 `excludeHosts`。每個這樣的指令也會在主機上多啟動幾個登入 shell（檢查、轉送、每次回答各一個）。
 
 有兩個選項，可在 `/config` 或設定檔裡設定：
 
@@ -109,6 +109,9 @@ session 開始時，mod 會啟動一個小型監聽程式（`bin/askpass --serve
 - 以 Windows sshd 作為遠端主機時原封不動放行（沒有遠端提示）。
 - 在 `ssh -t` 底下以絕對路徑呼叫 `/usr/bin/sudo` 時，它會直接讀取終端機而不是詢問。
 - 使用者自行安裝（不屬於 root）的 ssh 不會有遠端提示。
+- 遠端主機的登入設定檔（rc 檔）若會輸出到 stdout，檢查會失敗，指令照常執行，沒有遠端提示。
+- ssh 的選項值或主機名稱含有空白時（`-o "User alice"`），該指令沒有遠端提示；請改寫成 `-o User=alice`。
+- 監聽程式執行期間，PreToolUse hook 和 auto 模式的分類器看到的 Bash 指令會帶著 `export PATH='…/bin/shim':"$PATH"; ` 前綴；權限規則則是比對原本的指令。
 
 ## 移除
 

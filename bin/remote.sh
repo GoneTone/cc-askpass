@@ -214,6 +214,8 @@ for word in "$@"; do
   case $word in
     --askpass | --stdin | --non-interactive) exec "$real" "$@" ;;
     --) break ;;
+    # Long options whose value is the next word.
+    --user | --group | --host | --prompt | --chdir | --role | --type | --other-user | --close-from | --command-timeout) skip=1 ;;
     --*) ;;
     -?*)
       letters=${word#-}

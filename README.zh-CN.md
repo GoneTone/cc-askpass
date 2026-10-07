@@ -51,13 +51,13 @@ claude plugin install cc-askpass@cc-askpass
 
 - `ssh host sudo apt update`，以及远程脚本里的 sudo（`ssh host ./deploy.sh`）。
 - 再往下跳：从远程主机再 `ssh` 到第三台。
-- rsync、ansible 和会调用 ssh 的脚本。
+- rsync、ansible 和会调用 ssh 的脚本。带有 `-S` 或 `-n` 的远程 sudo（例如 ansible 的 become）则原样放行，不会出现在面板上。
 
 无法参与的主机会被自动检测并原样放行，ssh 的行为和没装 cc-askpass 时一样：git 托管服务（`git@github.com`）、网络设备、设有 forced command 的账号、Windows sshd，以及没有 `/bin/sh` 的主机。
 
 面板会标出主机名（`sudo on server needs your password`），在 `$` 那行后面加上 `(reported by server)`，而且远程提示一律显示 `Claude ran:` 那行，外加一条警告，请你回答前先确认。
 
-在你自己的机器上，PATH 里找到的 `ssh` 必须是属于 root 的可执行文件（例如 `/usr/bin/ssh`），否则 ssh 照常运行，不会有远程提示。调用方自己指定的 `ControlPath` 或 `-S` 不会被沿用，所以像 ansible 这类工具会多开一条连接。
+在你自己的机器上，PATH 里找到的 `ssh` 必须是属于 root 的可执行文件（例如 `/usr/bin/ssh`），否则 ssh 照常运行，不会有远程提示。调用方自己指定的 `ControlPath` 或 `-S` 不会被沿用，所以像 ansible 这类工具会多开一条连接。你自己 `~/.ssh/config` 里的 `ControlMaster`/`ControlPersist` 也不会被沿用：经 cc-askpass 处理的每个 ssh 命令都会开自己的连接，所以需要密码或双因素认证才能登录的主机，每个命令都会再问一次；这类主机请加到 `excludeHosts`。每个这样的命令还会在主机上多启动几个登录 shell（检查、转发、每次回答各一个）。
 
 有两个选项，可在 `/config` 或配置文件里设置：
 
@@ -109,6 +109,9 @@ Claude 的 Bash 命令 → sudo → bin/askpass → 请求 FIFO → cc-askpass m
 - 以 Windows sshd 作为远程主机时原样放行（没有远程提示）。
 - 在 `ssh -t` 下以绝对路径调用 `/usr/bin/sudo` 时，它会直接读取终端而不是询问。
 - 用户自行安装（不属于 root）的 ssh 不会有远程提示。
+- 远程主机的登录配置文件（rc 文件）如果向 stdout 输出内容，检查会失败，命令照常运行，没有远程提示。
+- ssh 的选项值或主机名含有空格时（`-o "User alice"`），该命令没有远程提示；请改写成 `-o User=alice`。
+- 监听程序运行期间，PreToolUse hook 和 auto 模式的分类器看到的 Bash 命令会带有 `export PATH='…/bin/shim':"$PATH"; ` 前缀；权限规则则是匹配原始命令。
 
 ## 卸载
 
