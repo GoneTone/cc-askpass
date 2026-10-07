@@ -251,7 +251,9 @@ tools fails the probe, and the original command runs unwrapped. The result is ca
 - Heading: `sudo on server needs your password` (`<comm> on <host> needs a password` for others)
   plus a `remote` tag; never the local wording.
 - `$` line: the reported command, followed by `(reported by server)`.
-- `Claude ran:` line: the ssh command Claude ran, as today.
+- `Claude ran:` line: the Bash command Claude ran, always shown for remote requests (even when
+  it equals the `$` line), followed by a dim warning that a remote prompt can be raised by code
+  running as the user and to check this command before answering.
 - The remote prompt below, quoted. A remote prompt such as `[sudo] password for <local user>`
   still sits under the remote heading.
 - Masking: every remote prompt is masked except git's `Username for '…'` and ssh's
@@ -295,10 +297,17 @@ Declared as `userConfig` in `plugin.json`:
 
 - Locally nothing changes: a request is shown only after `ps` shows it comes from this
   plugin's helper, started by sudo, a trusted client, or this plugin's ssh wrapper.
-- On the remote host the relay applies the local verification rules (§4.5), so commands Claude
-  runs cannot obtain an answer by calling askpass themselves. What remains trusted is the remote
-  account itself: a process already running there as the user can race for a reply, as a local
-  one can (original spec §7). The pane therefore names the host from local, verified data and labels everything
+- On the remote host the relay applies the local verification rules (§4.5), so a command that
+  simply calls askpass itself gets no answer.
+- Residual risk, accepted by the project owner (2026-10-07) with the feature on by default: a
+  relay is a shell script, and a process running as the user can make its command line look
+  like one (`exec -a` with `BASH_ENV` needs no compiler). Only root-owned identities (sudo's
+  euid, a root-owned executable) are anchored by the kernel. So code running as the user,
+  locally or on the remote host, including a command Claude runs that deliberately forges a
+  relay, can raise a pane that names a remote host and capture what is typed into it. Local
+  sudo prompts are not affected. Mitigations: every remote pane shows the `Claude ran:` line
+  (the Bash command as Claude Code recorded it, which no process can change) and a warning;
+  the README states the risk and how to turn the feature off (`remoteHosts: false`). The pane therefore names the host from local, verified data and labels everything
   else as reported by the host.
 - The token directory is 0700 and the socket permissions are sshd's (owner only), so other
   accounts on the remote host cannot raise prompts.
