@@ -2,7 +2,7 @@
 
 [English](README.md) | [繁體中文](README.zh-TW.md) | 简体中文
 
-**sudo 密码在 Claude Code 里输入，不用粘贴到对话中。**
+**让 Claude 直接运行需要 sudo 的命令，不用再把命令复制到自己的终端执行。**
 
 Claude 执行的命令需要密码时（`sudo apt install`、会调用 sudo 的安装脚本、通过 HTTPS 的 `git push`、带口令的 ssh 密钥），cc-askpass 会在 Claude Code 里弹出密码面板。你在面板里输入密码，密码会直接交给发起请求的程序，不会进入模型、对话记录或任何日志。
 
@@ -12,7 +12,7 @@ Claude 执行的命令需要密码时（`sudo apt install`、会调用 sudo 的�
 sudo: a terminal is required to read the password; either use the -S option ...
 ```
 
-常见的变通方法都更糟：把密码粘贴到对话里让 Claude 用 `sudo -S`，密码就进了模型的 context；放弃并自己动手执行命令；或者在 sudoers 里配置 `NOPASSWD`。
+结果只好把命令复制到自己的终端执行，再把结果告诉 Claude。其他变通方法风险更高：把密码粘贴到对话里让 Claude 用 `sudo -S`，密码就进了模型的 context；在 sudoers 里配置 `NOPASSWD`，则任何程序都能不经询问就以 root 运行。
 
 - **无需配置。** 装好之后，sudo、ssh 和 git 需要密码时就会直接询问你。
 - **密码不经过模型。** 密码从面板经由私有的 FIFO 送到发起请求的进程，不会出现在模型的 context、日志、命令行或任何文件里。
