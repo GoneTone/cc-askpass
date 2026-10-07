@@ -9,7 +9,8 @@ When a command Claude runs needs a password (`sudo apt install`, an install scri
 Without it, Claude's Bash tool has no terminal, so sudo fails at once:
 
 ```
-sudo: a terminal is required to read the password; either use the -S option ...
+sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper
+sudo: a password is required
 ```
 
 So you end up copying the command into your own terminal, running it there and telling Claude how it went. The other ways around it are riskier: pasting the password into the chat for `sudo -S` puts it in the model's context, and `NOPASSWD` in sudoers lets anything run as root without asking.

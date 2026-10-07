@@ -9,7 +9,8 @@ Claude 執行的指令需要密碼時（`sudo apt install`、會呼叫 sudo 的�
 沒有它的話，Claude 的 Bash 工具沒有終端機，sudo 會直接失敗：
 
 ```
-sudo: a terminal is required to read the password; either use the -S option ...
+sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper
+sudo: a password is required
 ```
 
 結果只好把指令複製到自己的終端機執行，再把結果告訴 Claude。其他繞路方法風險更高：把密碼貼進對話讓 Claude 用 `sudo -S`，密碼就進了模型的 context；在 sudoers 設定 `NOPASSWD`，則任何東西都能不經詢問就以 root 執行。

@@ -9,7 +9,8 @@ Claude 执行的命令需要密码时（`sudo apt install`、会调用 sudo 的�
 没有它的话，Claude 的 Bash 工具没有终端，sudo 会直接失败：
 
 ```
-sudo: a terminal is required to read the password; either use the -S option ...
+sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper
+sudo: a password is required
 ```
 
 结果只好把命令复制到自己的终端执行，再把结果告诉 Claude。其他变通方法风险更高：把密码粘贴到对话里让 Claude 用 `sudo -S`，密码就进了模型的 context；在 sudoers 里配置 `NOPASSWD`，则任何程序都能不经询问就以 root 运行。
