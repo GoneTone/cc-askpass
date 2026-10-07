@@ -121,7 +121,8 @@ decide() {
     CC_ASKPASS_SHIM_LIB=1
     . "$wrapper"
     CC_ASKPASS_DIR="$tmp/dir"
-    SSH_ASKPASS=${t_askpass-/x}
+    lib=$root/bin
+    SSH_ASKPASS=${t_askpass-$root/bin/askpass}
     CC_ASKPASS_EXCLUDE=${t_exclude-}
     parse_args "$@"
     if should_wrap; then echo wrap; else echo no; fi
@@ -140,7 +141,7 @@ expect_decision() {
   got=$(decide "$@")
   [ "$got" = "$want" ] || fail "got '$got', want '$want'"
   teardown
-  t_mode= t_exclude= t_askpass=/x
+  t_mode= t_exclude= t_askpass=$root/bin/askpass
 }
 
 test_two_wrappers() {
@@ -167,7 +168,75 @@ test_status_and_stdout
 test_only_itself
 test_two_wrappers
 
-t_mode= t_exclude= t_askpass=/x
+# The wrapper's own tools come from the system: one on the caller's PATH would run as the
+# wrapper's child, where the mod looks for the relay.
+setup 'tools are not taken from the caller PATH'
+printf '#!/bin/sh\ntouch "%s/readlink-ran"\n' "$tmp" > "$tmp/fake/readlink"
+chmod +x "$tmp/fake/readlink"
+env PATH="$shimdir:$tmp/fake:$PATH" CC_ASKPASS_DIR="$tmp/dir" SSH_ASKPASS="$root/bin/askpass" \
+  FAKE_SSH_ARGS="$tmp/args" sh "$wrapper" h sudo true > "$tmp/out" 2> "$tmp/err"
+[ ! -e "$tmp/readlink-ran" ] || fail 'ran the fake readlink'
+# The fake ssh is not root-owned: the command passes through to it.
+printf '%s\n' h sudo true | cmp -s - "$tmp/args" || fail "fake got: $(cat "$tmp/args" 2> /dev/null)"
+teardown
+
+# relay_mode ARGS...: the wrapper in relay mode with one request line on stdin, ARGS as env.
+relay_mode() {
+  printf '12\tPassword: \t\tsudo true\n' |
+    env CC_ASKPASS_DIR="$tmp/dir" CCAP_HOST=h CCAP_TOKEN=0123456789abcdef FAKE_SSH_ARGS="$tmp/args" \
+      "$@" sh "$wrapper" --relay h > "$tmp/out" 2> "$tmp/err"
+}
+
+setup 'relay refuses a user-owned ssh'
+relay_mode PATH="$tmp/fake:$PATH" CCAP_CTL="$tmp/dir/s.1"
+status=$?
+[ "$status" = 1 ] || fail "status $status"
+grep -q 'relay refused: .* is not a root-owned ssh binary' "$tmp/err" || fail "stderr: $(cat "$tmp/err")"
+[ ! -e "$tmp/args" ] || fail "sent through the fake: $(cat "$tmp/args")"
+teardown
+
+setup 'relay refuses a socket it was not given by wrap'
+relay_mode CCAP_CTL=/tmp/elsewhere
+[ "$?" = 1 ] || fail 'not refused'
+grep -q 'relay refused: CCAP_CTL' "$tmp/err" || fail "stderr: $(cat "$tmp/err")"
+teardown
+
+# ctl_case WANT CTL [TOKEN]: relay_env_ok for the session directory $tmp/dir.
+ctl_case() {
+  got=$(
+    CC_ASKPASS_SHIM_LIB=1
+    . "$wrapper"
+    CC_ASKPASS_DIR=$tmp/dir CCAP_CTL=$2 CCAP_TOKEN=${3:-0123456789abcdef}
+    if relay_env_ok; then echo ok; else echo refused; fi
+  )
+  [ "$got" = "$1" ] || fail "$2 ${3:-}: got $got"
+}
+
+setup 'relay socket checks'
+ccap=$(mktemp -d /tmp/ccap.XXXXXX)
+open_ccap=$(mktemp -d /tmp/ccap.XXXXXX)
+chmod 755 "$open_ccap"
+: > "$tmp/dir/s.2"
+if command -v python3 > /dev/null; then
+  for sock in "$tmp/dir/s.1" "$ccap/c" "$open_ccap/c"; do
+    python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$sock"
+  done
+  ctl_case ok "$tmp/dir/s.1"
+  ctl_case ok "$ccap/c"
+  ctl_case refused "$tmp/dir/s.1" 'x;y'
+  ctl_case refused "$open_ccap/c"
+else
+  echo 'SKIP: relay socket checks with a socket: no python3'
+fi
+ctl_case refused "$tmp/dir/s.2"
+ctl_case refused "$tmp/dir/../dir/s.1"
+ctl_case refused "$tmp/other/s.1"
+ctl_case refused "$tmp/dir/s.x/s.1"
+ctl_case refused /tmp/ccap.x/y/c
+rm -rf "$ccap" "$open_ccap"
+teardown
+
+t_mode= t_exclude= t_askpass=$root/bin/askpass
 expect_decision wrap h sudo true
 expect_decision no h /usr/bin/git-upload-pack x
 expect_decision no h scp -t /x
@@ -181,6 +250,8 @@ t_exclude='fe80::1' expect_decision no fe80::1 sudo true
 t_mode=relay expect_decision wrap h sudo true
 t_mode=dead expect_decision no h sudo true
 t_askpass= expect_decision no h sudo true
+# The relay asks the askpass beside the wrapper: another one in SSH_ASKPASS means not ours.
+t_askpass=/x expect_decision no h sudo true
 expect_decision no -N h sudo true
 expect_decision no h -N -L 1:a:2
 
@@ -304,6 +375,14 @@ f_comm=sh f_parent="/bin/sh${nl}$vdir/ssh${nl}--relay${nl}db01${nl}x" \
   f_grand="/bin/sh${nl}$vdir/ssh${nl}db01${nl}x" verify_case reject 'relay with more args'
 f_comm=sh f_parent="/bin/sh${nl}/tmp/ssh${nl}--relay${nl}db01" \
   f_grand="/bin/sh${nl}/tmp/ssh${nl}db01${nl}x" verify_case reject 'relay of another copy'
+# `find <dir>/ssh db01 -exec /bin/sh <dir>/ssh --relay db01 ;` starts a real relay.
+f_comm=sh f_parent="/bin/sh${nl}$vdir/ssh${nl}--relay${nl}db01" \
+  f_grand="find${nl}$vdir/ssh${nl}db01${nl}-exec${nl}/bin/sh${nl}$vdir/ssh${nl}--relay${nl}db01${nl};" \
+  verify_case reject 'relay started by find'
+f_comm=sh f_parent="/bin/sh${nl}$vdir/ssh${nl}--relay${nl}db01" \
+  f_grand="/bin/bash${nl}$vdir/ssh${nl}db01${nl}x" verify_case reject 'wrapper under another shell'
+f_comm=python3 f_parent="/usr/bin/python3${nl}$vdir/ssh${nl}--relay${nl}db01" \
+  f_grand="/usr/bin/python3${nl}$vdir/ssh${nl}db01${nl}x" verify_case reject 'relay not run by a shell'
 rm -rf "$vdir"
 
 # The local relay: malformed remote lines are skipped, never asked or answered.
@@ -320,6 +399,8 @@ for word; do last=$word; done
 printf '%s|%s\n' "${last##* }" "$(cat)" >> "$SENT"
 EOF
 chmod +x "$tmp/askpass" "$tmp/mux"
+# The relay's lib directory: the reply line is built from remote.sh.
+cp "$root/bin/remote.sh" "$tmp/"
 {
   printf '12\tPassword: \t\tsudo true\n'
   printf 'no tab\n'
@@ -333,8 +414,9 @@ chmod +x "$tmp/askpass" "$tmp/mux"
 (
   CC_ASKPASS_SHIM_LIB=1
   . "$wrapper"
-  real_ssh=$tmp/mux lib=$root/bin
-  SSH_ASKPASS=$tmp/askpass ASKED=$tmp/asked SENT=$tmp/sent CC_ASKPASS_REMOTE=1
+  # The askpass beside the wrapper is asked, never SSH_ASKPASS.
+  real_ssh=$tmp/mux lib=$tmp
+  SSH_ASKPASS=/nonexistent ASKED=$tmp/asked SENT=$tmp/sent CC_ASKPASS_REMOTE=1
   CCAP_CTL=/c CCAP_HOST=u@h CCAP_TOKEN=0123456789abcdef
   export ASKED SENT CC_ASKPASS_REMOTE
   relay_requests h < "$tmp/lines"

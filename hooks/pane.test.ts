@@ -629,7 +629,8 @@ test('remote text loses its control characters', async ($, on) => {
   const drawn = JSON.stringify(await ui.drawn())
   expect(drawn.includes('\\u00')).toBe(false)
   expect(/[\u007f-\u009f]/.test(drawn)).toBe(false)
-  expect((await ui.find({ type: 'Text', text: /needs/ }))?.text).toBe('sudo on db01 via server needs your password')
+  // A via with anything but host names in it is not shown at all.
+  expect((await ui.find({ type: 'Text', text: /needs/ }))?.text).toBe('sudo on server needs your password')
 })
 
 test('a remote username prompt is shown in clear, unless sudo reported it', async ($, on) => {
@@ -707,4 +708,56 @@ test('password never leaks from a relayed request', async ($, on) => {
   const shown = [...w.rec.toasts, ...w.rec.logs, ...w.rec.opens.map(open => open.title ?? '')].join('\n')
   expect(shown.includes(PASSWORD.trim())).toBe(false)
   expect(w.rec.runs.some(run => run.argv.some(arg => arg.includes(PASSWORD.trim())))).toBe(false)
+})
+
+test('rejects relayed requests with remoteHosts off', { options: { remoteHosts: false } }, async ($, on) => {
+  const w = await world($, on)
+  await w.relayRequest(4242, { prompt: BOB_PROMPT, via: 'server', reported: 'sudo true' })
+  expect(w.rec.opens).toEqual([])
+  expect(w.rec.toasts.filter(text => text.includes('Rejected askpass request'))).toHaveLength(1)
+  expect(w.replies().map(reply => reply.stdin)).toEqual(['\n'])
+})
+
+test('a remote username then password is no retry', async ($, on) => {
+  const w = await world($, on)
+  await w.relayRequest(4242, { prompt: "Username for 'https://x': ", via: 'server', reported: 'git pull' })
+  let ui = await w.mount('terminal')
+  await ui.input({ key: await passwordKey(ui), text: 'bob' })
+  await w.clock.settle()
+  await ui.unmount()
+  await w.relayRequest(4243, { prompt: "Password for 'https://bob@x': ", via: 'server', reported: 'git pull' })
+  ui = await w.mount('terminal')
+  expect(await ui.find({ text: /Password for/ })).toBeDefined()
+  expect(await ui.find({ text: /Sorry, try again/ })).toBeUndefined()
+})
+
+test('a via that is not a host chain is left out', async ($, on) => {
+  const w = await world($, on)
+  await w.relayRequest(4242, { prompt: BOB_PROMPT, via: 'this computer', reported: 'sudo true' })
+  const ui = await w.mount('terminal')
+  expect((await ui.find({ type: 'Text', text: /needs/ }))?.text).toBe('sudo on server needs your password')
+})
+
+/** Answers the open relayed request, then relays `next` from the same relay. */
+async function answerThenRelay(w: any, $: any, first: { prompt: string; reported: string }, next: { prompt: string; reported: string }) {
+  await w.relayRequest(4242, { ...first, via: 'server' })
+  let ui = await w.mount('terminal')
+  await ui.input({ key: await passwordKey(ui), text: 'x' })
+  await w.clock.settle()
+  await ui.unmount()
+  await w.relayRequest(4243, { ...next, via: 'server' })
+  ui = await w.mount('terminal')
+  return ui.find({ text: /Sorry, try again/ })
+}
+
+test('only a remote sudo is taken to retry', async ($, on) => {
+  const w = await world($, on)
+  const ask = { prompt: "Password for 'https://bob@x': ", reported: 'git pull' }
+  expect(await answerThenRelay(w, $, ask, ask)).toBeUndefined()
+})
+
+test('a remote sudo asking something else is no retry', async ($, on) => {
+  const w = await world($, on)
+  const sorry = await answerThenRelay(w, $, { prompt: BOB_PROMPT, reported: 'sudo true' }, { prompt: 'Verification code: ', reported: 'sudo true' })
+  expect(sorry).toBeUndefined()
 })

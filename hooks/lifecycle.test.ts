@@ -276,6 +276,10 @@ async function bashWorld($: any, on: any) {
       await clock.settle()
       return (serve.argvs[0]?.[0] ?? '').replace(/\/bin\/askpass$/, '')
     },
+    async stop() {
+      serve.end()
+      await clock.settle()
+    },
     async bash(command: string) {
       await $.tool.call({ tool: 'Bash', command } as never)
       return ran.at(-1)
@@ -306,4 +310,25 @@ test('the sudo note mentions ssh', async ($, on) => {
   const w = await bashWorld($, on)
   await w.ready()
   expect((await sudoNote($))?.text).toContain('ssh host sudo')
+})
+
+test('drops the prefix when the listener stops', async ($, on) => {
+  const w = await bashWorld($, on)
+  await w.ready()
+  await w.stop()
+  expect(await w.bash('ssh h sudo true')).toBe('ssh h sudo true')
+})
+
+test('the sudo note leaves out ssh with remoteHosts off', { options: { remoteHosts: false } }, async ($, on) => {
+  const w = await bashWorld($, on)
+  await w.ready()
+  const text = (await sudoNote($))?.text ?? ''
+  expect(text).toContain('Do not add `-n` or `-S`')
+  expect(text).not.toContain('ssh host sudo')
+})
+
+test('CC_ASKPASS_EXCLUDE is empty by default', async ($, on) => {
+  const w = await bashWorld($, on)
+  await w.ready()
+  expect(w.rec.envValue('CC_ASKPASS_EXCLUDE')).toBe('')
 })

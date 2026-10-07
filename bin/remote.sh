@@ -169,7 +169,12 @@ verify() {
   relay_host=${rest#--relay"$nl"}
   [ "$relay_host" != "$rest" ] || return 1
   case $relay_host in '' | *[!A-Za-z0-9._@:%-]*) return 1 ;; esac
+  # The wrapper runs under the relay's own shell (both from its shebang): `find <dir>/ssh host
+  # -exec …` carries the same args but is not it.
+  relay_shell=${p_argv%%"$nl"*}
+  case ${relay_shell##*/} in sh | dash | bash | zsh | ksh | ash | busybox) ;; *) return 1 ;; esac
   proc "$p_ppid" || return 1
+  [ "${p_argv%%"$nl"*}" = "$relay_shell" ] || return 1
   args=$(after "$dir/ssh" "$p_argv") || return 1
   [ "$(target_name "$args")" = "$relay_host" ]
 }

@@ -16,7 +16,8 @@ import {
   parseReady,
   parseRequest,
   relayHost,
-  relayParentArgs,
+  relayWrapperHost,
+  pathPrefix,
   remoteLabel,
   stripControl,
   wrapperTarget,
@@ -87,7 +88,11 @@ test('wrapperTarget reads the host the way the wrapper names it', () => {
   expect(wrapperTarget(`/bin/sh ${shim} -t -- ssh://alice@server:2222 sudo x`, shim)).toBe('server')
   expect(wrapperTarget(`/bin/sh ${shim} server:22 x`, shim)).toBe('server')
   expect(wrapperTarget(`/bin/sh ${shim} fe80::1 x`, shim)).toBe('fe80::1')
-  expect(wrapperTarget(`${shim} -lalice server x`, shim)).toBe('server')
+  expect(wrapperTarget(`/usr/bin/dash ${shim} -lalice server x`, shim)).toBe('server')
+  // Only a shell runs the wrapper: other programs can carry its path and a host as arguments.
+  expect(wrapperTarget(`${shim} server x`, shim)).toBe(null)
+  expect(wrapperTarget(`find ${shim} server -exec /bin/sh ${shim} --relay server ;`, shim)).toBe(null)
+  expect(wrapperTarget(`/usr/bin/python3 ${shim} server x`, shim)).toBe(null)
   // An option's value is not the host.
   expect(wrapperTarget(`/bin/sh ${shim} -p server`, shim)).toBe(null)
   expect(wrapperTarget(`/bin/sh ${shim} --relay server`, shim)).toBe(null)
@@ -98,18 +103,37 @@ test('wrapperTarget reads the host the way the wrapper names it', () => {
   expect(wrapperTarget(`/bin/sh ${shim} evil ssh server`, shim)).toBe('evil')
 })
 
-test('relayParentArgs skips subshells that copy the relay', () => {
-  const table = parsePsTable(
-    ['4100 4099 sh shim --relay server', '4099 3900 sh shim --relay server', '3900 950 sh shim server x'].join('\n'),
-  )
-  expect(relayParentArgs(table, 4100)).toBe('sh shim server x')
-  expect(relayParentArgs(table, 3900)).toBe(null)
-  expect(relayParentArgs(table, 1)).toBe(null)
+test('relayWrapperHost takes only the relay immediate parent, run by the same shell', () => {
+  const shim = '/p/bin/shim/ssh'
+  const host = (rows: string[]) => relayWrapperHost(parsePsTable(rows.join('\n')), 4100, shim)
+  expect(host([`4100 3900 /bin/sh ${shim} --relay server`, `3900 950 /bin/sh ${shim} server x`])).toBe('server')
+  // A relay started by a program the genuine relay ran: nothing in between is skipped.
+  expect(
+    host([
+      `4100 4099 /bin/sh ${shim} --relay server`,
+      `4099 3900 /bin/sh ${shim} --relay server`,
+      `3900 950 /bin/sh ${shim} server x`,
+    ]),
+  ).toBe(null)
+  // `find <shim> server -exec /bin/sh <shim> --relay server ;` starts a real relay.
+  expect(host([`4100 3900 /bin/sh ${shim} --relay server`, `3900 950 find ${shim} server -exec /bin/sh ${shim} --relay server ;`])).toBe(null)
+  expect(host([`4100 3900 /bin/sh ${shim} --relay server`, `3900 950 /bin/bash ${shim} server x`])).toBe(null)
+  expect(host([`4100 3900 /bin/sh ${shim} --relay server`])).toBe(null)
+  expect(host([])).toBe(null)
 })
 
 test('stripControl drops C0 and C1 controls, escape included', () => {
   expect(stripControl('a\u001b[31mb\u0007c\u009bd\u007fe\tf')).toBe('a[31mbcdef')
   expect(stripControl('sudo apt update')).toBe('sudo apt update')
+})
+
+test('stripControl drops invisible format and bidi characters', () => {
+  expect(stripControl('a\u200bb\u200fc\u202ad\u202ee\u2066f\u2069g\u2028h\u2029i')).toBe('abcdefghi')
+})
+
+test('pathPrefix single-quotes the root', () => {
+  expect(pathPrefix('/opt/p')).toBe(`export PATH='/opt/p/bin/shim':"$PATH"; `)
+  expect(pathPrefix(`/opt/it's`)).toBe(`export PATH='/opt/it'\\''s/bin/shim':"$PATH"; `)
 })
 
 test('parseHelperPs reads ppid and args', () => {

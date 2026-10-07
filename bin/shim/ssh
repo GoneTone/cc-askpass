@@ -187,7 +187,8 @@ EOF
 # should_wrap: 0 only when a password prompt on the remote host can reach the pane.
 should_wrap() {
   listener_alive || return 1
-  [ -n "${SSH_ASKPASS:-}" ] || return 1
+  # The relay asks the askpass beside this file; one that SSH_ASKPASS does not name is not ours to use.
+  [ "${SSH_ASKPASS:-}" = "$lib/askpass" ] || return 1
   [ -n "$command" ] || return 1
   [ -z "$pass_flag" ] || return 1
   is_protocol_command && return 1
@@ -267,14 +268,14 @@ choose_ctl() {
 start_master() {
   eval "set -- $master_opts"
   rm -f "$ctl"
-  "$real_ssh" "$@" -o ControlMaster=yes -S "$ctl" -o ControlPersist=yes -N -f "$host" < /dev/null > /dev/null
+  PATH=$user_path "$real_ssh" "$@" -o ControlMaster=yes -S "$ctl" -o ControlPersist=yes -N -f "$host" < /dev/null > /dev/null
 }
 
 # start_session REMOTE_COMMAND: the user's session over the master, stdin on fd 3.
 start_session() {
   remote=$1
   eval "set -- $session_opts"
-  "$real_ssh" "$@" -S "$ctl" "$host" "$remote" <&3 3<&- &
+  PATH=$user_path "$real_ssh" "$@" -S "$ctl" "$host" "$remote" <&3 3<&- &
   session_pid=$!
 }
 
@@ -321,7 +322,8 @@ wrap() {
       # Both are our children: the mod checks that the relay's parent is this wrapper.
       mux -T "$host" "$(remote_line '' relay "$token")" < /dev/null > "$relay_fifo" 2> /dev/null &
       relay_ssh_pid=$!
-      CCAP_CTL=$ctl CCAP_HOST=$host CCAP_TOKEN=$token "$self" --relay "$name" < "$relay_fifo" > /dev/null &
+      # With the caller's PATH, so the relay finds the same real ssh.
+      PATH=$user_path CCAP_CTL=$ctl CCAP_HOST=$host CCAP_TOKEN=$token "$self" --relay "$name" < "$relay_fifo" > /dev/null &
       relay_pid=$!
       remote=$line
     fi
@@ -362,16 +364,49 @@ relay_requests() {
         ;;
     esac
     via=${via:+$via via }$1
-    answer=$(CC_ASKPASS_VIA=$via CC_ASKPASS_REPORTED=$reported CC_ASKPASS_REMOTE= "$SSH_ASKPASS" "$prompt")
+    # The askpass shipped beside this file, never SSH_ASKPASS, and exec'd so that this relay is
+    # its parent on every shell: the mod accepts the request by that parent.
+    answer=$(
+      export CC_ASKPASS_VIA="$via" CC_ASKPASS_REPORTED="$reported" CC_ASKPASS_REMOTE=
+      exec "$lib/askpass" "$prompt"
+    )
     # The answer only ever travels on stdin.
     printf '%s\n' "$answer" | mux -T "$host" "$(remote_line '' reply "$token" "$pid")" > /dev/null 2>&1
   done
+}
+
+# relay_env_ok: the relay's settings are ones wrap gives it: a token of hex digits and CCAP_CTL a
+# socket choose_ctl names, in the session directory or alone in a 0700 /tmp/ccap.* directory of
+# this user.
+relay_env_ok() {
+  case ${CCAP_TOKEN:-} in '' | *[!0-9a-f]*) return 1 ;; esac
+  ctl_path=${CCAP_CTL:-}
+  case $ctl_path in *..*) return 1 ;; esac
+  if [ -n "${CC_ASKPASS_DIR:-}" ] && [ "${ctl_path#"$CC_ASKPASS_DIR"/s.}" != "$ctl_path" ]; then
+    case ${ctl_path#"$CC_ASKPASS_DIR"/s.} in '' | */*) return 1 ;; esac
+  else
+    case ${ctl_path#/tmp/ccap.} in
+      "$ctl_path" | */*/* | */) return 1 ;;
+      */c) ;;
+      *) return 1 ;;
+    esac
+    # shellcheck disable=SC2046
+    set -- $(ls -ldn "${ctl_path%/c}" 2> /dev/null)
+    case ${1:-} in drwx------*) ;; *) return 1 ;; esac
+    [ "${3:-}" = "$(id -u)" ] || return 1
+  fi
+  [ -S "$ctl_path" ]
 }
 
 # Tests source the file for its functions.
 [ "${CC_ASKPASS_SHIM_LIB:-}" = 1 ] && return
 
 find_real_ssh
+# Our own tools come from the system, not from the caller's PATH: a program found there would
+# run as this wrapper's child, where the mod looks for the relay. The real ssh (and so the
+# user's ProxyCommand and the like) still gets the caller's PATH.
+user_path=$PATH
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
 # The mod checks a remote request's helper by its parent's args: an absolute path to this file.
 self=$0
 case $self in /*) ;; *) self=$(pwd)/$self ;; esac
@@ -380,9 +415,21 @@ lib=${self%/*}
 [ -f "$lib/remote.sh" ] || lib=${lib%/*}
 
 if [ "${1:-}" = --relay ] && [ -n "${CCAP_TOKEN:-}" ]; then
+  # The relay sends answers: it checks what it sends them through, whoever started it.
+  if ! trusted_ssh; then
+    echo "$me: relay refused: $real_ssh is not a root-owned ssh binary" >&2
+    exit 1
+  fi
+  if ! relay_env_ok; then
+    echo "$me: relay refused: CCAP_CTL is not a master socket of this wrapper" >&2
+    exit 1
+  fi
   relay_requests "${2:-}"
   exit 0
 fi
 parse_args "$@"
-should_wrap && trusted_ssh || exec "$real_ssh" "$@"
+if ! { should_wrap && trusted_ssh; }; then
+  PATH=$user_path
+  exec "$real_ssh" "$@"
+fi
 wrap

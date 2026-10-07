@@ -18,10 +18,10 @@ import {
   parseRequest,
   promptLabel,
   relayHost,
-  relayParentArgs,
+  relayWrapperHost,
   remoteLabel,
   stripControl,
-  wrapperTarget,
+  pathPrefix,
   wrappedLines,
   shouldMask,
   splitLines,
@@ -49,6 +49,8 @@ const REMOTE_WARNING =
 const MAX_LABEL_LENGTH = 120
 // Characters of a remote program's name the heading shows.
 const MAX_PROGRAM_LENGTH = 40
+// A relayed host chain as the wrapper writes it: host names joined by ` via `.
+const VIA_PATTERN = /^[A-Za-z0-9._@:%-]+( via [A-Za-z0-9._@:%-]+)*$/
 // Time for the band to drop its button and hand the keyboard back (verified at 150 ms).
 const BAND_RELEASE_MS = 150
 const PANE = 'askpass'
@@ -139,7 +141,10 @@ async function verify($: EngineInterface, line: string): Promise<void> {
 
   if (!requester.isSudo) {
     const host = relayHost(requester.command, `${$.plugin.root}/bin/shim/ssh`)
-    if (!(await (host === null ? isTrustedCaller($, requester) : isWrapperRelay($, requester.pid, host)))) {
+    // With remote prompts off no relay is taken, whoever started it.
+    const isAllowed =
+      host === null ? await isTrustedCaller($, requester) : isRemoteOn && (await isWrapperRelay($, requester.pid, host))
+    if (!isAllowed) {
       // The helper is ours: an empty answer makes it fail at once instead of waiting.
       $.ui.toast(`Rejected askpass request from ${requester.comm} (pid ${requester.pid})`)
       log($, `rejected request from untrusted caller: ${requester.command}`)
@@ -148,7 +153,9 @@ async function verify($: EngineInterface, line: string): Promise<void> {
     if (host !== null) {
       // Everything but the host is remote text: it may not drive the terminal.
       const clean = (text: string | null) => (text === null ? null : stripControl(text) || null)
-      requester.remote = { host, via: clean(parsed.via), reported: clean(parsed.reported) }
+      // The wrapper writes host names only: any other chain is dropped, not shown.
+      const via = parsed.via !== null && VIA_PATTERN.test(parsed.via) ? parsed.via : null
+      requester.remote = { host, via, reported: clean(parsed.reported) }
       request.prompt = stripControl(parsed.prompt)
     }
   }
@@ -178,8 +185,7 @@ async function isTrustedCaller($: EngineInterface, requester: Requester): Promis
  */
 async function isWrapperRelay($: EngineInterface, relayPid: number, host: string): Promise<boolean> {
   const ps = await $.process.run(['ps', '-e', '-ww', '-o', 'pid=,ppid=,args='])
-  const wrapper = relayParentArgs(parsePsTable(ps.stdout), relayPid)
-  return wrapper !== null && wrapperTarget(wrapper, `${$.plugin.root}/bin/shim/ssh`) === host
+  return relayWrapperHost(parsePsTable(ps.stdout), relayPid, `${$.plugin.root}/bin/shim/ssh`) === host
 }
 
 /** The Bash command Claude ran that led to `requester`, if one of the recent ones matches. */
@@ -209,14 +215,16 @@ async function isRequestAlive($: EngineInterface, request: Request): Promise<boo
 }
 
 /**
- * What answered requests are remembered by, to tell a retry: sudo's pid locally. A relayed
- * line carries only the remote helper's pid, new on every ask, so a remote request goes by its
- * relay (one per ssh command) and the command the remote side reported.
+ * What answered requests are remembered by, to tell a retry; only sudo asks again for the
+ * same thing. Locally sudo's pid. A relayed line carries only the remote helper's pid, new on
+ * every ask, so a remote sudo goes by its relay (one per ssh command), the command the remote
+ * side reported and the prompt.
  */
 function retryKey(request: Request): number | string | null {
   const { remote, isSudo, pid } = request.requester
-  if (remote !== undefined) return `${remote.host}:${pid}:${remote.reported ?? ''}`
-  return isSudo ? pid : null
+  if (remote === undefined) return isSudo ? pid : null
+  if (remoteProgram(remote.reported) !== 'sudo') return null
+  return `${remote.host}:${pid}:${remote.reported}:${request.prompt}`
 }
 
 /** The program a remote request names: the reported command's first word, or "a program". */
@@ -490,7 +498,8 @@ async function runServe($: EngineInterface): Promise<void> {
 
 export const register: Register = (on, options) => {
   isRemoteOn = options.remoteHosts !== false
-  excludeHosts = typeof options.excludeHosts === 'object' ? options.excludeHosts : []
+  const globs: unknown = options.excludeHosts
+  excludeHosts = Array.isArray(globs) ? globs.filter((glob): glob is string => typeof glob === 'string') : []
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -518,10 +527,7 @@ export const register: Register = (on, options) => {
     recentBashCommands.push(e.command)
     if (recentBashCommands.length > RECENT_BASH_LIMIT) recentBashCommands.shift()
     if (!isListening || !isRemoteOn) return next(e)
-    // After the snapshot's own `export PATH`, so the command and its children (rsync, git,
-    // scripts) find the ssh wrapper first.
-    const shim = `${$.plugin.root}/bin/shim`.replaceAll(`'`, `'\\''`)
-    return next({ ...e, command: `export PATH='${shim}':"$PATH"; ${e.command}` })
+    return next({ ...e, command: pathPrefix($.plugin.root) + e.command })
   })
 
   on('session.end', async ($, e, next) => {

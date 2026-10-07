@@ -62,19 +62,31 @@ export function remoteLabel(host: string, via: string | null): string {
   return via.endsWith(` via ${host}`) ? via : `${via} via ${host}`
 }
 
+/**
+ * What goes before a Bash command so it finds our ssh wrapper first: after the snapshot's own
+ * `export PATH`, so the command and its children (rsync, git, scripts) inherit it.
+ */
+export function pathPrefix(root: string): string {
+  return `export PATH='${`${root}/bin/shim`.replaceAll(`'`, `'\\''`)}':"$PATH"; `
+}
+
 // ssh's options as getopts takes them (a colon after a letter that takes a value).
 const SSH_OPTIONS = '1246ab:c:e:fgi:kl:m:no:p:qstvxAB:CD:E:F:GI:J:KL:MNO:P:Q:R:S:TVw:W:XYy'
 
+// Shells a `#!/bin/sh` script can run under, by basename (busybox runs sh as itself).
+const SHELLS = ['sh', 'dash', 'bash', 'zsh', 'ksh', 'ash', 'busybox']
+
 /**
- * The host a process running our ssh wrapper in normal mode (`[<interpreter> ]<shimPath> <ssh
- * args>`) connects to, named the way the wrapper names it (no `ssh://`, `user@` or `:port`).
+ * The host a process running our ssh wrapper in normal mode (`<shell> <shimPath> <ssh args>`)
+ * connects to, named the way the wrapper names it (no `ssh://`, `user@` or `:port`). Only a
+ * shell counts as the interpreter: `find <shimPath> server -exec …` is not the wrapper.
  * ps joins the arguments with spaces, so they are split on whitespace: an option value with
  * a space in it (`-o "ProxyCommand ssh -W %h:%p jump"`) misreads, and the request is refused.
  */
 export function wrapperTarget(args: string, shimPath: string): string | null {
-  const afterInterpreter = args.slice(args.indexOf(' ') + 1)
-  const command = [args, afterInterpreter].find(candidate => candidate.startsWith(`${shimPath} `))
-  if (command === undefined) return null
+  const interpreter = args.slice(0, args.indexOf(' '))
+  const command = args.slice(interpreter.length + 1)
+  if (!SHELLS.includes(interpreter.split('/').at(-1) ?? '') || !command.startsWith(`${shimPath} `)) return null
   const words = command.slice(shimPath.length + 1).split(/\s+/).filter(Boolean)
   let i = 0
   for (; i < words.length; i++) {
@@ -106,21 +118,25 @@ function hostName(host: string): string {
 }
 
 /**
- * The args of the relay's parent, skipping subshells that copy the relay's own args (a shell
- * may fork one for `$(…)`); null when the table does not have it.
+ * The host the wrapper that started relay `relayPid` connects to: its immediate parent, run by
+ * the relay's own interpreter (both come from the wrapper's shebang). Nothing in between is
+ * skipped, so a relay started by a program the genuine relay ran does not pass.
  */
-export function relayParentArgs(table: PsTable, relayPid: number): string | null {
+export function relayWrapperHost(table: PsTable, relayPid: number, shimPath: string): string | null {
   const relay = table.get(relayPid)
-  let parent = relay === undefined ? undefined : table.get(relay.ppid)
-  for (let hops = 0; hops < 3 && parent !== undefined && parent.args === relay?.args; hops++) {
-    parent = table.get(parent.ppid)
-  }
-  return parent === undefined || parent.args === relay?.args ? null : parent.args
+  const wrapper = relay === undefined ? undefined : table.get(relay.ppid)
+  if (relay === undefined || wrapper === undefined) return null
+  if (wrapper.args.split(' ')[0] !== relay.args.split(' ')[0]) return null
+  return wrapperTarget(wrapper.args, shimPath)
 }
 
-/** `text` without C0 and C1 control characters (ESC included): remote text must not drive the terminal. */
+/**
+ * `text` without C0 and C1 control characters (ESC included) and the invisible format and
+ * bidi characters that reorder or hide text: remote text must not drive the terminal or
+ * disguise itself.
+ */
 export function stripControl(text: string): string {
-  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+  return text.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, '')
 }
 
 /** Output of `ps -o ppid=,args= -p <helper pid>`; the args keep the prompt's trailing space. */
