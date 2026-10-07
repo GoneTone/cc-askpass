@@ -15,7 +15,7 @@ cc-askpass 是一個 Claude Code mod，會在 Claude Code 裡跳出密碼面板�
 ## 需求
 
 - Claude Code 2.1.289 以上
-- Linux 或 WSL。macOS 理論上可用，但未經測試。不支援 Windows 原生版。
+- Linux、WSL 或 macOS（已在 macOS 14 測試）。不支援 Windows 原生版。
 
 ## 安裝
 
@@ -75,7 +75,6 @@ session 開始時，mod 會啟動一個小型監聽程式（`bin/askpass --serve
 - 非互動模式（`claude -p`、SDK）下沒有人能回答，mod 不會啟動，sudo 會和沒裝 mod 時一樣直接失敗。
 - 開啟 Bash 沙箱時，sudo 無法提權，helper 也看不到監聽程式，會立刻以「the cc-askpass listener is not running」失敗。
 - ssh 的確認提示（`SSH_ASKPASS_PROMPT=confirm`）會以一般文字輸入的形式出現。
-- 在 macOS 上，確認 ssh／git 呼叫者是 root 擁有的真正執行檔的檢查改用 `lsof`，而不是 Linux 的 `/proc`。這部分未經測試；檢查失敗時會拒絕該提示。sudo 不依賴這個檢查。
 
 ## 移除
 
