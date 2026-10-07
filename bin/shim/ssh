@@ -76,13 +76,17 @@ parse_opts() {
         ;;
     esac
     quote "-$opt"
-    opts="$opts $quoted"
+    words=$quoted
     case $arg_opts in
       *"$opt"*)
         quote "$OPTARG"
-        opts="$opts $quoted"
+        words="$words $quoted"
         ;;
     esac
+    opts="$opts $words"
+    # The master has no session, so no tty; the sessions over it must not become masters.
+    case $opt in t | T) ;; *) master_opts="$master_opts $words" ;; esac
+    [ "$opt" = M ] || session_opts="$session_opts $words"
   done
   consumed=$((OPTIND - 1))
   ended=
@@ -94,10 +98,13 @@ parse_opts() {
 }
 
 # parse_args ARGS...: split ssh's arguments into opts (option words, quoted for
-# `eval "set -- $opts"`), host, command, pass_flag, tty_opts and caller_ctl.
+# `eval "set -- $opts"`; master_opts without -t/-T, session_opts without -M), host, command,
+# pass_flag, tty_opts and caller_ctl.
 # Like ssh, options after the host are options too, unless `--` came first.
 parse_args() {
   opts=
+  master_opts=
+  session_opts=
   host=
   command=
   pass_flag=
@@ -153,8 +160,8 @@ is_protocol_command() {
   return 1
 }
 
-# is_excluded: host (without ssh://, user@ and :port) matches a CC_ASKPASS_EXCLUDE glob.
-is_excluded() {
+# host_name: set name to host without ssh://, user@ and :port.
+host_name() {
   name=${host#ssh://}
   is_url=1
   [ "$name" != "$host" ] || is_url=
@@ -167,6 +174,11 @@ is_excluded() {
       fi
       ;;
   esac
+}
+
+# is_excluded: the host name matches a CC_ASKPASS_EXCLUDE glob.
+is_excluded() {
+  host_name
   while IFS= read -r glob; do
     [ -n "$glob" ] || continue
     # shellcheck disable=SC2254
@@ -185,14 +197,172 @@ should_wrap() {
   [ -z "$pass_flag" ] || return 1
   is_protocol_command && return 1
   is_excluded && return 1
+  # The name goes into the relay's args and the request lines, where the mod checks it.
+  case $name in '' | *[!A-Za-z0-9._@:%-]*) return 1 ;; esac
   return 0
+}
+
+b64() {
+  base64 | tr -d '\n'
+}
+
+# remote_line VARS [ARGS...]: the remote command that evals bin/remote.sh with ARGS and the
+# VARS assignments ("NAME=value " each) in its environment. It holds only base64, plain words
+# and the single-quoted eval, which sh, bash, zsh and fish all read the same way.
+remote_line() {
+  vars=$1
+  shift
+  # Test-only, passed when its words are plain.
+  case ${CCAP_TEST_BASES:-} in
+    '' | *[!A-Za-z0-9/._\ -]*) ;;
+    *) vars="${vars}CCAP_TEST_BASES='$CCAP_TEST_BASES' " ;;
+  esac
+  # shellcheck disable=SC2016
+  printf "env %sCCAP_RS_B64=%s /bin/sh -c '%s'" "$vars" "$(b64 < "$lib/remote.sh")" \
+    'eval "$(printf %s "$CCAP_RS_B64" | base64 -d 2>/dev/null || printf %s "$CCAP_RS_B64" | base64 -D)"'
+  [ $# -eq 0 ] || printf ' _ %s' "$*"
+}
+
+# bootstrap_line COMMAND: the remote command that sets up the remote askpass and runs COMMAND.
+bootstrap_line() {
+  remote_line "CCAP_TOKEN=$token CCAP_ASKPASS_B64=$(b64 < "$lib/askpass") CCAP_SSH_B64=$(b64 < "$self") CCAP_CMD_B64=$(printf %s "$1" | b64) "
+}
+
+# bounded COMMAND...: run COMMAND (not a function: its child would outlive the kill), killed after 5 s.
+bounded() {
+  "$@" &
+  bounded_pid=$!
+  (sleep 5 && kill "$bounded_pid") > /dev/null 2>&1 &
+  bounded_watchdog=$!
+  wait "$bounded_pid" 2> /dev/null
+  bounded_status=$?
+  kill "$bounded_watchdog" 2> /dev/null
+  return "$bounded_status"
+}
+
+# aux REMOTE_COMMAND: a session over the master that is not the user's.
+aux() {
+  "$real_ssh" -T -S "$ctl" "$host" "$1"
+}
+
+start_master() {
+  eval "set -- $master_opts"
+  rm -f "$ctl"
+  "$real_ssh" "$@" -M -S "$ctl" -o ControlPersist=yes -N -f "$host" < /dev/null > /dev/null
+}
+
+# start_session REMOTE_COMMAND: the user's session over the master, stdin on fd 3.
+start_session() {
+  remote=$1
+  eval "set -- $session_opts"
+  "$real_ssh" "$@" -S "$ctl" "$host" "$remote" <&3 3<&- &
+  session_pid=$!
+}
+
+cleanup() {
+  [ -z "$session_pid" ] || kill "$session_pid" 2> /dev/null
+  [ -z "$relay_pid" ] || kill "$relay_pid" 2> /dev/null
+  [ -z "$own_master" ] || "$real_ssh" -S "$ctl" -O exit "$host" > /dev/null 2>&1
+  [ -z "$ctl_dir" ] || rm -rf "$ctl_dir"
+}
+
+# interrupted STATUS: the remote side gets no signal when the connection closes, so ask its
+# bootstrap to stop before closing.
+interrupted() {
+  [ -z "$relay_pid" ] || bounded "$real_ssh" -T -S "$ctl" "$host" "$(remote_line '' stop "$token")" < /dev/null > /dev/null 2>&1
+  cleanup
+  exit "$1"
+}
+
+# wrap: run the command over a master, with the remote askpass relayed to ours.
+wrap() {
+  token=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+  session_pid= relay_pid= own_master= ctl_dir=
+  if [ -n "$caller_ctl" ] && "$real_ssh" -S "$caller_ctl" -O check "$host" > /dev/null 2>&1; then
+    ctl=$caller_ctl
+  else
+    # Unix socket paths are short (104 bytes on macOS).
+    ctl=$CC_ASKPASS_DIR/s.$$
+    if [ "${#ctl}" -gt 100 ]; then
+      ctl_dir=$(mktemp -d /tmp/ccap.XXXXXX) || exit 255
+      ctl=$ctl_dir/c
+    fi
+    own_master=1
+  fi
+  trap 'interrupted 129' HUP
+  trap 'interrupted 130' INT
+  trap 'interrupted 143' TERM
+  if [ -n "$own_master" ]; then
+    # On failure ssh has said why; its status is ours.
+    start_master || {
+      status=$?
+      cleanup
+      exit "$status"
+    }
+  fi
+
+  # shellcheck disable=SC2016
+  probe=$(bounded "$real_ssh" -T -S "$ctl" "$host" 'command -v mkfifo >/dev/null && command -v base64 >/dev/null && echo cc-askpass-probe-ok' < /dev/null 2> /dev/null)
+  if [ "$probe" = cc-askpass-probe-ok ]; then
+    aux "$(remote_line '' relay "$token")" < /dev/null 2> /dev/null |
+      CCAP_CTL=$ctl CCAP_HOST=$host CCAP_TOKEN=$token "$self" --relay "$name" > /dev/null &
+    relay_pid=$!
+    remote=$(bootstrap_line "$command")
+  else
+    remote=$command
+  fi
+  { start_session "$remote"; } 3<&0
+  wait "$session_pid" 2> /dev/null
+  status=$?
+  session_pid=
+  cleanup
+  exit "$status"
+}
+
+# relay_requests NAME: relay mode. Read the remote askpass's request lines on stdin, ask ours
+# for each and send the answer back to the remote helper's reply FIFO.
+relay_requests() {
+  ctl=$CCAP_CTL
+  host=$CCAP_HOST
+  token=$CCAP_TOKEN
+  tab=$(printf '\t')
+  while IFS= read -r line; do
+    # <pid> TAB <prompt> [TAB <via> TAB <reported>]; the pid is remote text: digits only.
+    pid=${line%%"$tab"*}
+    [ "$pid" != "$line" ] || continue
+    case $pid in '' | *[!0-9]*) continue ;; esac
+    rest=${line#*"$tab"}
+    prompt=${rest%%"$tab"*}
+    via= reported=
+    case $rest in
+      *"$tab"*)
+        rest=${rest#*"$tab"}
+        via=${rest%%"$tab"*}
+        case $rest in *"$tab"*) reported=${rest#*"$tab"} ;; esac
+        ;;
+    esac
+    via=${via:+$via via }$1
+    answer=$(CC_ASKPASS_VIA=$via CC_ASKPASS_REPORTED=$reported CC_ASKPASS_REMOTE= "$SSH_ASKPASS" "$prompt")
+    # The answer only ever travels on stdin.
+    printf '%s\n' "$answer" | aux "$(remote_line '' reply "$token" "$pid")" > /dev/null 2>&1
+  done
 }
 
 # Tests source the file for its functions.
 [ "${CC_ASKPASS_SHIM_LIB:-}" = 1 ] && return
 
 find_real_ssh
+# The mod checks a remote request's helper by its parent's args: an absolute path to this file.
+self=$0
+case $self in /*) ;; *) self=$(pwd)/$self ;; esac
+# bin/shim/ssh next to bin/remote.sh and bin/askpass, or all three in a remote token directory.
+lib=${self%/*}
+[ -f "$lib/remote.sh" ] || lib=${lib%/*}
+
+if [ "${1:-}" = --relay ] && [ -n "${CCAP_TOKEN:-}" ]; then
+  relay_requests "${2:-}"
+  exit 0
+fi
 parse_args "$@"
-# The wrap path comes later; until then everything passes through.
-should_wrap
-exec "$real_ssh" "$@"
+should_wrap || exec "$real_ssh" "$@"
+wrap

@@ -21,4 +21,7 @@ jobs:
       - run: claude plugin validate .
       - run: claude plugin test .
       - run: sh tests/askpass.sh
+      # The ssh tests start their own sshd as the runner user.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get install -y openssh-server
       - run: sh tests/ssh.sh
