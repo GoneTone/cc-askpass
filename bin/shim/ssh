@@ -1,0 +1,173 @@
+#!/bin/sh
+# cc-askpass ssh wrapper. Found before the real ssh on PATH inside Claude's Bash commands.
+# It decides whether a password prompt on the remote host should reach the cc-askpass pane;
+# when not, it runs the real ssh with the original arguments. It never writes to stdout.
+
+me=cc-askpass
+
+# Option letters of ssh that take an argument.
+arg_opts=bceilmopBDEFIJLOPQRSwW
+
+# find_real_ssh: set real_ssh to the first ssh on PATH that is not this wrapper.
+find_real_ssh() {
+  case $0 in
+    */*) self_dir=${0%/*} ;;
+    *) self_dir=. ;;
+  esac
+  self_dir=$(cd "$self_dir" && pwd -P)
+  # Builtins only: PATH may be nothing but the shim directory.
+  rest=
+  oldifs=$IFS
+  IFS=:
+  for entry in $PATH; do
+    [ -n "$entry" ] || continue
+    here=$(cd "$entry" 2> /dev/null && pwd -P)
+    [ "$here" = "$self_dir" ] || rest="$rest${rest:+:}$entry"
+  done
+  IFS=$oldifs
+  # An empty PATH would search the current directory.
+  real_ssh=
+  [ -z "$rest" ] || real_ssh=$(PATH=$rest command -v ssh)
+  if [ -z "$real_ssh" ] || [ "$real_ssh" -ef "$self_dir/ssh" ]; then
+    echo "$me: the ssh wrapper found only itself on PATH" >&2
+    exit 255
+  fi
+}
+
+# quote WORD: set quoted to WORD in single quotes, safe for eval.
+quote() {
+  rest_word=$1
+  quoted=
+  while :; do
+    case $rest_word in
+      *\'*)
+        quoted="$quoted${rest_word%%\'*}'\\''"
+        rest_word=${rest_word#*\'}
+        ;;
+      *) break ;;
+    esac
+  done
+  quoted="'$quoted$rest_word'"
+}
+
+# set_ctl VALUE: ssh uses the first ControlPath it sees.
+set_ctl() {
+  [ -n "$caller_ctl" ] || caller_ctl=$1
+}
+
+# parse_args ARGS...: split ssh's arguments into opts (option words, quoted for
+# `eval "set -- $opts"`), host, command, pass_flag, tty_opts and caller_ctl.
+parse_args() {
+  opts=
+  host=
+  command=
+  pass_flag=
+  tty_opts=
+  caller_ctl=
+  OPTIND=1
+  while getopts '1246ab:c:e:fgi:kl:m:no:p:qstvxAB:CD:E:F:GI:J:KL:MNO:P:Q:R:S:TVw:W:XYy' opt; do
+    case $opt in
+      '?')
+        # ssh rejects it with its own message.
+        pass_flag=1
+        continue
+        ;;
+      N | W | O | s | G | V | Q | f) pass_flag=1 ;;
+      t) tty_opts="$tty_opts${tty_opts:+ }-t" ;;
+      S) set_ctl "$OPTARG" ;;
+      o)
+        # "Key=value", "Key value" or "Key = value"; keys are case-insensitive.
+        key=${OPTARG%%[=' ']*}
+        value=${OPTARG#"$key"}
+        value=${value#"${value%%[! ]*}"}
+        value=${value#=}
+        value=${value#"${value%%[! ]*}"}
+        case $key in
+          [Cc][Oo][Nn][Tt][Rr][Oo][Ll][Pp][Aa][Tt][Hh]) set_ctl "$value" ;;
+        esac
+        ;;
+    esac
+    quote "-$opt"
+    opts="$opts $quoted"
+    case $arg_opts in
+      *"$opt"*)
+        quote "$OPTARG"
+        opts="$opts $quoted"
+        ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+  host=${1:-}
+  [ $# -eq 0 ] || shift
+  command="$*"
+}
+
+# listener_alive: the mod's askpass --serve (or a remote relay) is still running.
+listener_alive() {
+  [ -n "${CC_ASKPASS_DIR:-}" ] || return 1
+  pidfile=$CC_ASKPASS_DIR/serve.pid
+  [ -e "$pidfile" ] || pidfile=$CC_ASKPASS_DIR/relay.pid
+  IFS= read -r listener < "$pidfile" 2> /dev/null && kill -0 "$listener" 2> /dev/null
+}
+
+# is_protocol_command: the command is a machine protocol that needs a clean channel.
+is_protocol_command() {
+  set -f
+  # shellcheck disable=SC2086
+  set -- $command
+  set +f
+  first=${1##*/}
+  case $first in
+    git-upload-pack | git-receive-pack | git-upload-archive | sftp-server | internal-sftp) return 0 ;;
+    scp)
+      shift
+      for word in "$@"; do
+        if [ "$word" = -t ] || [ "$word" = -f ]; then return 0; fi
+      done
+      ;;
+    rsync)
+      case $command in *sudo*) return 1 ;; esac
+      shift
+      for word in "$@"; do
+        [ "$word" = --server ] && return 0
+      done
+      ;;
+    borg) [ "${2:-}" = serve ] && return 0 ;;
+  esac
+  return 1
+}
+
+# is_excluded: host (without ssh://, user@ and :port) matches a CC_ASKPASS_EXCLUDE glob.
+is_excluded() {
+  name=${host#ssh://}
+  name=${name##*@}
+  name=${name%:*}
+  while IFS= read -r glob; do
+    [ -n "$glob" ] || continue
+    # shellcheck disable=SC2254
+    case $name in $glob) return 0 ;; esac
+  done << EOF
+${CC_ASKPASS_EXCLUDE:-}
+EOF
+  return 1
+}
+
+# should_wrap: 0 only when a password prompt on the remote host can reach the pane.
+should_wrap() {
+  listener_alive || return 1
+  [ -n "${SSH_ASKPASS:-}" ] || return 1
+  [ -n "$command" ] || return 1
+  [ -z "$pass_flag" ] || return 1
+  is_protocol_command && return 1
+  is_excluded && return 1
+  return 0
+}
+
+# Tests source the file for its functions.
+[ "${CC_ASKPASS_SHIM_LIB:-}" = 1 ] && return
+
+find_real_ssh
+parse_args "$@"
+# The wrap path comes later; until then everything passes through.
+should_wrap
+exec "$real_ssh" "$@"

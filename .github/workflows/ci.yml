@@ -21,3 +21,4 @@ jobs:
       - run: claude plugin validate .
       - run: claude plugin test .
       - run: sh tests/askpass.sh
+      - run: sh tests/ssh.sh
