@@ -17,6 +17,11 @@ import {
   parseReady,
   parseRequest,
   promptLabel,
+  relayHost,
+  relayParentArgs,
+  remoteLabel,
+  stripControl,
+  wrapperTarget,
   wrappedLines,
   shouldMask,
   splitLines,
@@ -32,6 +37,18 @@ const SUDO_NOTE =
   'prompt inside Claude Code whenever sudo (or ssh/git) needs one. Run sudo commands normally. ' +
   'Do not add `-n` or `-S`, do not pipe a password into sudo, and do not ask the user to run sudo ' +
   'themselves. If the user cancels or the password is wrong, sudo fails as usual; report that.'
+// Added while remote prompts are on: models add `-t` or ask the user to log in themselves.
+const REMOTE_NOTE =
+  ' sudo on hosts reached with `ssh` asks through the same prompt: run `ssh host sudo …` directly, ' +
+  'without `-t` or `-tt`, and do not ask the user to log in to the host themselves.'
+// Shown under the Claude line of every remote pane (spec §8): a process running as the user
+// can pose as a relay, so the person is the last check.
+const REMOTE_WARNING =
+  'A remote prompt can be raised by any program running as you. Answer only if you expected this command to need a password on this host.'
+// Characters of a remote host chain the heading shows; the verified host at its end always stays.
+const MAX_LABEL_LENGTH = 120
+// Characters of a remote program's name the heading shows.
+const MAX_PROGRAM_LENGTH = 40
 // Time for the band to drop its button and hand the keyboard back (verified at 150 ms).
 const BAND_RELEASE_MS = 150
 const PANE = 'askpass'
@@ -81,6 +98,9 @@ const LOAD_ID = Math.random().toString(36).slice(2, 8)
 // outlive their tool call, so these are kept by count, not by call.
 const recentBashCommands: string[] = []
 const RECENT_BASH_LIMIT = 50
+// The plugin's options, read in `register`; a change reloads the module.
+let isRemoteOn = true
+let excludeHosts: readonly string[] = []
 
 function log($: EngineInterface, text: string): void {
   void $.ui.log(`cc-askpass: ${text}`, { to: 'debug' })
@@ -115,35 +135,61 @@ async function verify($: EngineInterface, line: string): Promise<void> {
   const parentPs = await $.process.run(['ps', '-ww', '-o', 'user=,comm=,args=', '-p', String(helper.ppid)])
   const requester = parseParentPs(parentPs.stdout, helper.ppid)
   if (requester === null) return
-  const request: Request = { ...parsed, requester, isRetry: false, claudeCommand: null }
+  const request: Request = { helperPid: parsed.helperPid, prompt: parsed.prompt, requester, isRetry: false, claudeCommand: null }
 
   if (!requester.isSudo) {
-    // `<owner uid> <path>` of the caller's executable (bin/exe-of).
-    const exe = await $.process.run(['sh', `${$.plugin.root}/bin/exe-of`, String(requester.pid)])
-    if (!isTrustedClient(requester, exe.exitCode === 0 ? parseExeInfo(exe.stdout) : null)) {
+    const host = relayHost(requester.command, `${$.plugin.root}/bin/shim/ssh`)
+    if (!(await (host === null ? isTrustedCaller($, requester) : isWrapperRelay($, requester.pid, host)))) {
       // The helper is ours: an empty answer makes it fail at once instead of waiting.
       $.ui.toast(`Rejected askpass request from ${requester.comm} (pid ${requester.pid})`)
       log($, `rejected request from untrusted caller: ${requester.command}`)
       return reply($, request.helperPid, '')
     }
+    if (host !== null) {
+      // Everything but the host is remote text: it may not drive the terminal.
+      const clean = (text: string | null) => (text === null ? null : stripControl(text) || null)
+      requester.remote = { host, via: clean(parsed.via), reported: clean(parsed.reported) }
+      request.prompt = stripControl(parsed.prompt)
+    }
   }
 
-  request.claudeCommand = await findClaudeCommand($, requester)
-  request.isRetry = requester.isSudo && answered.has(requester.pid, await $.clock.now())
+  const claudeCommand = await findClaudeCommand($, requester)
+  // A local line that repeats the sudo command says nothing new; a remote pane always names it.
+  const isRepeat = requester.remote === undefined && claudeCommand?.trim() === requester.command.trim()
+  request.claudeCommand = isRepeat ? null : claudeCommand
+  const key = retryKey(request)
+  request.isRetry = key !== null && answered.has(key, await $.clock.now())
   queue.push(request)
   // The checks are done: a pane that fails to open leaves the request for /askpass.
   void showNext($).catch(error => log($, `could not show the request: ${String(error)}`))
 }
 
-/** The Bash command Claude ran that led to `requester`, if it differs from its own line. */
+/** Whether a non-sudo caller is a real ssh/git binary (see `isTrustedClient`). */
+async function isTrustedCaller($: EngineInterface, requester: Requester): Promise<boolean> {
+  // `<owner uid> <path>` of the caller's executable (bin/exe-of).
+  const exe = await $.process.run(['sh', `${$.plugin.root}/bin/exe-of`, String(requester.pid)])
+  return isTrustedClient(requester, exe.exitCode === 0 ? parseExeInfo(exe.stdout) : null)
+}
+
+/**
+ * Whether relay `relayPid` was started by our ssh wrapper running in normal mode for `host`:
+ * a `--relay` started by hand, or by a wrapper connected elsewhere, does not pass. The host
+ * comes from the command line Claude's command ran, never from the remote side.
+ */
+async function isWrapperRelay($: EngineInterface, relayPid: number, host: string): Promise<boolean> {
+  const ps = await $.process.run(['ps', '-e', '-ww', '-o', 'pid=,ppid=,args='])
+  const wrapper = relayParentArgs(parsePsTable(ps.stdout), relayPid)
+  return wrapper !== null && wrapperTarget(wrapper, `${$.plugin.root}/bin/shim/ssh`) === host
+}
+
+/** The Bash command Claude ran that led to `requester`, if one of the recent ones matches. */
 async function findClaudeCommand($: EngineInterface, requester: Requester): Promise<string | null> {
   const claudePid = claudePidOf(sessionDir)
   if (claudePid === null || recentBashCommands.length === 0) return null
   try {
     const ps = await $.process.run(['ps', '-e', '-ww', '-o', 'pid=,ppid=,args='])
     const shell = bashShellArgs(parsePsTable(ps.stdout), requester.pid, claudePid)
-    const command = shell === null ? null : matchBashCommand(shell, recentBashCommands)
-    return command === null || command.trim() === requester.command.trim() ? null : command
+    return shell === null ? null : matchBashCommand(shell, recentBashCommands)
   } catch (error) {
     // Only context for the pane: a failure here must not block the request.
     log($, `could not find the Bash command: ${String(error)}`)
@@ -156,7 +202,49 @@ async function isAlive($: EngineInterface, pid: number): Promise<boolean> {
   return (await $.process.run(['sh', '-c', 'kill -0 "$1"', '_', String(pid)])).exitCode === 0
 }
 
+/** A relayed request also ends with its relay: nothing is left to carry the answer back. */
+async function isRequestAlive($: EngineInterface, request: Request): Promise<boolean> {
+  if (!(await isAlive($, request.helperPid))) return false
+  return request.requester.remote === undefined || isAlive($, request.requester.pid)
+}
+
+/**
+ * What answered requests are remembered by, to tell a retry: sudo's pid locally. A relayed
+ * line carries only the remote helper's pid, new on every ask, so a remote request goes by its
+ * relay (one per ssh command) and the command the remote side reported.
+ */
+function retryKey(request: Request): number | string | null {
+  const { remote, isSudo, pid } = request.requester
+  if (remote !== undefined) return `${remote.host}:${pid}:${remote.reported ?? ''}`
+  return isSudo ? pid : null
+}
+
+/** The program a remote request names: the reported command's first word, or "a program". */
+function remoteProgram(reported: string | null): string {
+  const first = (reported ?? '').split(' ')[0] ?? ''
+  return (first.split('/').at(-1) ?? '').slice(0, MAX_PROGRAM_LENGTH) || 'a program'
+}
+
+/** The remote host chain, its start cut when long: the verified host at its end stays. */
+function hostLabel(remote: NonNullable<Requester['remote']>): string {
+  const label = remoteLabel(remote.host, remote.via)
+  return label.length > MAX_LABEL_LENGTH ? `…${label.slice(1 - MAX_LABEL_LENGTH)}` : label
+}
+
+/** Who waits for the password, for the band. */
+function askerName(requester: Requester): string {
+  const { remote } = requester
+  return remote === undefined ? requester.comm : `${remoteProgram(remote.reported)} on ${remote.host}`
+}
+
+function isMaskedByDefault(request: Request): boolean {
+  const { remote, isSudo } = request.requester
+  // A remote sudo is masked whatever its prompt says, as sudo is locally.
+  return shouldMask(remote === undefined ? isSudo : remoteProgram(remote.reported) === 'sudo', request.prompt)
+}
+
 function paneTitle(requester: Requester): string {
+  if (requester.remote !== undefined) return `Password for ${requester.remote.host}`
   return requester.isSudo ? 'sudo password' : `Password requested by ${requester.comm} (pid ${requester.pid})`
 }
 
@@ -171,12 +259,22 @@ function focusWarning(isMain: boolean): string {
 }
 
 function claudeLine(request: Request): string | null {
-  if (request.claudeCommand === null) return null
-  return clipLines(`Claude ran: ${request.claudeCommand}`, MAX_SECTION_ROWS, PANE_WIDTH)
+  // A remote pane always has the line: what Claude Code recorded is the one thing no process
+  // can change, and "(unknown)" says nothing vouches for the request.
+  const command = request.claudeCommand ?? (request.requester.remote === undefined ? null : '(unknown)')
+  if (command === null) return null
+  return clipLines(`Claude ran: ${command}`, MAX_SECTION_ROWS, PANE_WIDTH)
 }
 
 function commandLine(request: Request): string {
-  return clipLines(`$ ${request.requester.command}`, MAX_SECTION_ROWS, PANE_WIDTH)
+  const { remote } = request.requester
+  if (remote === undefined) return clipLines(`$ ${request.requester.command}`, MAX_SECTION_ROWS, PANE_WIDTH)
+  if (remote.reported === null) return `$ (not reported by ${remote.host})`
+  // Only the reported text is cut: who reported it must stay in view.
+  const suffix = ` (reported by ${remote.host})`
+  const room = MAX_SECTION_ROWS * PANE_WIDTH - suffix.length
+  const line = `$ ${remote.reported}`
+  return `${line.length > room ? `${line.slice(0, room - 1)}…` : line}${suffix}`
 }
 
 /**
@@ -185,13 +283,24 @@ function commandLine(request: Request): string {
  */
 function paneRows(request: Request): number {
   const claude = claudeLine(request)
-  const header = 1 + (claude === null ? 0 : wrappedLines(claude, PANE_WIDTH)) + wrappedLines(commandLine(request), PANE_WIDTH)
+  // The `remote` tag and the warning under the Claude line.
+  const remote = request.requester.remote === undefined ? 0 : 1 + wrappedLines(REMOTE_WARNING, PANE_WIDTH)
+  const header =
+    wrappedLines(paneHeading(request.requester), PANE_WIDTH) +
+    remote +
+    (claude === null ? 0 : wrappedLines(claude, PANE_WIDTH)) +
+    wrappedLines(commandLine(request), PANE_WIDTH)
   const field = (request.isRetry ? 1 : 0) + wrappedLines(promptLabel(request.prompt), PANE_WIDTH) + 1
   const blankLines = 2
   return wrappedLines(focusWarning(false), PANE_WIDTH) + header + field + 1 + blankLines
 }
 
 function paneHeading(requester: Requester): string {
+  const { remote } = requester
+  if (remote !== undefined) {
+    const program = remoteProgram(remote.reported)
+    return `${program} on ${hostLabel(remote)} needs ${program === 'sudo' ? 'your' : 'a'} password`
+  }
   return requester.isSudo ? 'sudo needs your password' : `${requester.comm} (pid ${requester.pid}) needs a password`
 }
 
@@ -237,15 +346,15 @@ async function showNext($: EngineInterface): Promise<void> {
   isAdvancing = true
   try {
     for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
-      if (!(await isAlive($, next.helperPid))) continue
+      if (!(await isRequestAlive($, next))) continue
       const request = next
       current = request
       typed = ''
-      isMasked = shouldMask(request.requester.isSudo, request.prompt)
+      isMasked = isMaskedByDefault(request)
       // A pane still open from before a reload is not drawn again by `ui.open`.
       $.ui.invalidate('ui.render')
       aliveTimer = $.clock.every(ALIVE_POLL_MS, () => {
-        void isAlive($, request.helperPid)
+        void isRequestAlive($, request)
           .then(alive => (alive || request.isAnswered ? undefined : finish($, request)))
           .catch(error => log($, `alive check failed: ${String(error)}`))
       })
@@ -286,7 +395,8 @@ async function submit($: EngineInterface, request: Request, password: string): P
   if (current !== request || request.isAnswered) return
   request.isAnswered = true
   await reply($, request.helperPid, password)
-  if (request.requester.isSudo) answered.mark(request.requester.pid, await $.clock.now())
+  const key = retryKey(request)
+  if (key !== null) answered.mark(key, await $.clock.now())
   await finish($, request)
 }
 
@@ -295,6 +405,8 @@ async function setEnv($: EngineInterface): Promise<void> {
   await $.env.set('SUDO_ASKPASS', askpassPath)
   await $.env.set('SSH_ASKPASS', askpassPath)
   await $.env.set('SSH_ASKPASS_REQUIRE', 'force')
+  // Read by bin/shim/ssh, one glob per line.
+  await $.env.set('CC_ASKPASS_EXCLUDE', excludeHosts.join('\n'))
   // sudo only uses askpass when DISPLAY is set; a real display is left alone. The marker
   // survives a hot reload (module variables do not), so ownership of :0 is not forgotten.
   const display = await $.env.get('DISPLAY')
@@ -312,6 +424,7 @@ async function unsetEnv($: EngineInterface): Promise<void> {
   await $.env.set('SUDO_ASKPASS', undefined)
   await $.env.set('SSH_ASKPASS', undefined)
   await $.env.set('SSH_ASKPASS_REQUIRE', undefined)
+  await $.env.set('CC_ASKPASS_EXCLUDE', undefined)
   if (didSetDisplay) {
     await $.env.set('DISPLAY', undefined)
     await $.env.set('CC_ASKPASS_SET_DISPLAY', undefined)
@@ -375,7 +488,10 @@ async function runServe($: EngineInterface): Promise<void> {
   $.ui.toast('cc-askpass: the askpass listener stopped; sudo will not ask for passwords here')
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  isRemoteOn = options.remoteHosts !== false
+  excludeHosts = typeof options.excludeHosts === 'object' ? options.excludeHosts : []
+
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     // Under -p or the SDK nobody can answer a pane: leave sudo to fail at once as before.
@@ -392,15 +508,20 @@ export const register: Register = on => {
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
     if (!isListening) return composed
-    return { sections: [...composed.sections, { id: 'cc-askpass:sudo', text: SUDO_NOTE, scope: 'session' as const }] }
+    const text = isRemoteOn ? SUDO_NOTE + REMOTE_NOTE : SUDO_NOTE
+    return { sections: [...composed.sections, { id: 'cc-askpass:sudo', text, scope: 'session' as const }] }
   })
 
   on('tool.call', { tool: 'Bash' }, ($, e, next) => {
-    if (e.tool === 'Bash') {
-      recentBashCommands.push(e.command)
-      if (recentBashCommands.length > RECENT_BASH_LIMIT) recentBashCommands.shift()
-    }
-    return next(e)
+    if (e.tool !== 'Bash') return next(e)
+    // The command as Claude wrote it: the prefix below is ours.
+    recentBashCommands.push(e.command)
+    if (recentBashCommands.length > RECENT_BASH_LIMIT) recentBashCommands.shift()
+    if (!isListening || !isRemoteOn) return next(e)
+    // After the snapshot's own `export PATH`, so the command and its children (rsync, git,
+    // scripts) find the ssh wrapper first.
+    const shim = `${$.plugin.root}/bin/shim`.replaceAll(`'`, `'\\''`)
+    return next({ ...e, command: `export PATH='${shim}':"$PATH"; ${e.command}` })
   })
 
   on('session.end', async ($, e, next) => {
@@ -439,7 +560,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         <Text>
-          {request.requester.comm} is waiting for a password — {howToOpen}
+          {askerName(request.requester)} is waiting for a password — {howToOpen}
         </Text>
         <Box>
           {/* ctrl+x tab hands the band the keys; the ring starts here so Enter presses it. */}
@@ -466,6 +587,7 @@ export const register: Register = on => {
     const key = `password-${request.helperPid}-${LOAD_ID}`
     const warning = e.props.isFocused ? null : focusWarning(isMainScreen(e))
     const claude = claudeLine(request)
+    const isRemote = request.requester.remote !== undefined
 
     return (
       <Box flexDirection="column" paddingX={1}>
@@ -474,10 +596,18 @@ export const register: Register = on => {
             {warning}
           </Text>
         )}
-        <Text bold>{paneHeading(request.requester)}</Text>
+        <Text bold wrap="wrap">
+          {paneHeading(request.requester)}
+        </Text>
+        {isRemote && <Text dimColor>remote</Text>}
         {claude !== null && (
           <Text dimColor wrap="wrap">
             {claude}
+          </Text>
+        )}
+        {isRemote && (
+          <Text dimColor wrap="wrap">
+            {REMOTE_WARNING}
           </Text>
         )}
         <Text dimColor wrap="wrap">

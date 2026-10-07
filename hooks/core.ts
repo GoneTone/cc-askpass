@@ -4,7 +4,15 @@ const ANSWERED_TTL_MS = 10 * 60 * 1000
 // Whole command lines are shown; this only stops a pathological argv from flooding the pane.
 const MAX_COMMAND_LENGTH = 2000
 
-export type Requester = { pid: number; isSudo: boolean; comm: string; command: string }
+export type Requester = {
+  pid: number
+  isSudo: boolean
+  comm: string
+  command: string
+  // Set for a request relayed by our ssh wrapper: `host` from the wrapper's own args, the rest
+  // as the remote side reported it, control characters removed.
+  remote?: { host: string; via: string | null; reported: string | null }
+}
 
 const firstLine = (out: string): string => out.split('\n')[0] ?? ''
 
@@ -45,11 +53,74 @@ export function relayHost(args: string, shimPath: string): string | null {
   return null
 }
 
-/** A relayed request's label: the reported host chain, then the host we verified, which always comes last. */
+/**
+ * A relayed request's label: the reported host chain, then the host we verified, which always
+ * comes last. The wrapper ends `via` with the hop it relays from, so that hop is not doubled.
+ */
 export function remoteLabel(host: string, via: string | null): string {
-  if (!via) return host
-  const suffix = ` via ${host}`
-  return `${via.endsWith(suffix) ? via.slice(0, -suffix.length) : via}${suffix}`
+  if (!via || via === host) return host
+  return via.endsWith(` via ${host}`) ? via : `${via} via ${host}`
+}
+
+// ssh's options as getopts takes them (a colon after a letter that takes a value).
+const SSH_OPTIONS = '1246ab:c:e:fgi:kl:m:no:p:qstvxAB:CD:E:F:GI:J:KL:MNO:P:Q:R:S:TVw:W:XYy'
+
+/**
+ * The host a process running our ssh wrapper in normal mode (`[<interpreter> ]<shimPath> <ssh
+ * args>`) connects to, named the way the wrapper names it (no `ssh://`, `user@` or `:port`).
+ * ps joins the arguments with spaces, so they are split on whitespace: an option value with
+ * a space in it (`-o "ProxyCommand ssh -W %h:%p jump"`) misreads, and the request is refused.
+ */
+export function wrapperTarget(args: string, shimPath: string): string | null {
+  const afterInterpreter = args.slice(args.indexOf(' ') + 1)
+  const command = [args, afterInterpreter].find(candidate => candidate.startsWith(`${shimPath} `))
+  if (command === undefined) return null
+  const words = command.slice(shimPath.length + 1).split(/\s+/).filter(Boolean)
+  let i = 0
+  for (; i < words.length; i++) {
+    const word = words[i] ?? ''
+    if (word === '--') {
+      i++
+      break
+    }
+    if (!word.startsWith('-') || word === '-') break
+    for (let j = 1; j < word.length; j++) {
+      const at = SSH_OPTIONS.indexOf(word[j] ?? '')
+      if (at < 0 || word[j] === ':') return null
+      if (SSH_OPTIONS[at + 1] !== ':') continue
+      // The value is the rest of the word, or the next word.
+      if (j === word.length - 1) i++
+      break
+    }
+  }
+  const host = words[i]
+  return host === undefined ? null : hostName(host)
+}
+
+/** `host` without `ssh://`, `user@` and `:port`; a bare IPv6 address (several colons) stays whole. */
+function hostName(host: string): string {
+  const name = host.replace(/^ssh:\/\//, '').replace(/^.*@/, '')
+  const isUrl = host.startsWith('ssh://')
+  const colons = name.split(':').length - 1
+  return colons > 0 && (isUrl || colons === 1) ? name.slice(0, name.lastIndexOf(':')) : name
+}
+
+/**
+ * The args of the relay's parent, skipping subshells that copy the relay's own args (a shell
+ * may fork one for `$(…)`); null when the table does not have it.
+ */
+export function relayParentArgs(table: PsTable, relayPid: number): string | null {
+  const relay = table.get(relayPid)
+  let parent = relay === undefined ? undefined : table.get(relay.ppid)
+  for (let hops = 0; hops < 3 && parent !== undefined && parent.args === relay?.args; hops++) {
+    parent = table.get(parent.ppid)
+  }
+  return parent === undefined || parent.args === relay?.args ? null : parent.args
+}
+
+/** `text` without C0 and C1 control characters (ESC included): remote text must not drive the terminal. */
+export function stripControl(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
 }
 
 /** Output of `ps -o ppid=,args= -p <helper pid>`; the args keep the prompt's trailing space. */
@@ -106,16 +177,19 @@ export function applyMaskedInput(real: string, shown: string): string {
   return real.slice(0, leading) + inserted + real.slice(real.length - trailing)
 }
 
-/** Sudo pids already answered: a second request from one means the password was wrong. */
+/**
+ * Sudo pids (and keys of remote requests) already answered: a second request from one means
+ * the password was wrong.
+ */
 export class AnsweredPids {
-  private readonly answeredAt = new Map<number, number>()
+  private readonly answeredAt = new Map<number | string, number>()
 
-  mark(pid: number, now: number): void {
+  mark(pid: number | string, now: number): void {
     this.prune(now)
     this.answeredAt.set(pid, now)
   }
 
-  has(pid: number, now: number): boolean {
+  has(pid: number | string, now: number): boolean {
     this.prune(now)
     return this.answeredAt.has(pid)
   }

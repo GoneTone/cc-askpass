@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import { SESSION_DIR, SESSION_ID, fakeServe, recorder } from './testkit'
 
 const START = { cwd: '/w', surface: 'terminal', isInteractive: true } as const
-const ASKPASS_VARS = ['CC_ASKPASS_DIR', 'SUDO_ASKPASS', 'SSH_ASKPASS', 'SSH_ASKPASS_REQUIRE']
+const ASKPASS_VARS = ['CC_ASKPASS_DIR', 'CC_ASKPASS_EXCLUDE', 'SUDO_ASKPASS', 'SSH_ASKPASS', 'SSH_ASKPASS_REQUIRE']
 
 test('session.start spawns serve with the session id', async ($, on) => {
   const clock = mock.clock(on)
@@ -252,4 +252,58 @@ test('registers /askpass as immediate', async ($, on) => {
   await $.session.start(START)
   await clock.settle()
   expect(rec.commands).toContainEqual({ name: 'askpass', immediate: true })
+})
+
+/** A session with a ready listener whose Bash commands reach a stand-in tool, recorded. */
+async function bashWorld($: any, on: any) {
+  const clock = mock.clock(on)
+  mock.env(on, {})
+  const serve = fakeServe(on)
+  const rec = recorder(on)
+  const ran: string[] = []
+  // Stands in for the Bash tool itself, beneath the plugin's tool.call hook.
+  on('tool.call', (_$: unknown, e: { command: string }) => {
+    ran.push(e.command)
+    return { result: { stdout: '', stderr: '', interrupted: false }, text: '' } as never
+  })
+  await $.session.start(START)
+  await clock.settle()
+  return {
+    rec,
+    ran,
+    async ready() {
+      serve.emit(`ready\t${SESSION_DIR}\n`)
+      await clock.settle()
+      return (serve.argvs[0]?.[0] ?? '').replace(/\/bin\/askpass$/, '')
+    },
+    async bash(command: string) {
+      await $.tool.call({ tool: 'Bash', command } as never)
+      return ran.at(-1)
+    },
+  }
+}
+
+test('prefixes Bash commands with the shim directory while listening', async ($, on) => {
+  const w = await bashWorld($, on)
+  expect(await w.bash('ssh h sudo true')).toBe('ssh h sudo true')
+  const root = await w.ready()
+  expect(await w.bash('ssh h sudo true')).toBe(`export PATH='${root}/bin/shim':"$PATH"; ssh h sudo true`)
+})
+
+test('no prefix with remoteHosts off', { options: { remoteHosts: false } }, async ($, on) => {
+  const w = await bashWorld($, on)
+  await w.ready()
+  expect(await w.bash('ssh h sudo true')).toBe('ssh h sudo true')
+})
+
+test('sets CC_ASKPASS_EXCLUDE from excludeHosts', { options: { excludeHosts: ['*.internal', 'git.example.com'] } }, async ($, on) => {
+  const w = await bashWorld($, on)
+  await w.ready()
+  expect(w.rec.envValue('CC_ASKPASS_EXCLUDE')).toBe('*.internal\ngit.example.com')
+})
+
+test('the sudo note mentions ssh', async ($, on) => {
+  const w = await bashWorld($, on)
+  await w.ready()
+  expect((await sudoNote($))?.text).toContain('ssh host sudo')
 })

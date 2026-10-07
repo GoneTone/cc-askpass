@@ -26,8 +26,13 @@ async function world($: any, on: any) {
   const ps = new Map<string, string>()
   const exes = new Map<string, string>()
   const alive = new Set<number>()
-  // Stands in for the Bash tool itself, beneath the plugin's tool.call hook.
-  on('tool.call', () => ({ result: { stdout: '', stderr: '', interrupted: false }, text: '' }) as never)
+  // Stands in for the Bash tool itself, beneath the plugin's tool.call hook: the shell runs
+  // the command as the plugin passed it on.
+  let ranCommand = ''
+  on('tool.call', (_$: unknown, e: { command: string }) => {
+    ranCommand = e.command
+    return { result: { stdout: '', stderr: '', interrupted: false }, text: '' } as never
+  })
   let isPsMissing = false
   let psTable = ''
   const rec = recorder(on, argv => {
@@ -49,6 +54,7 @@ async function world($: any, on: any) {
   serve.emit(`ready\t${SESSION_DIR}\n`)
   await clock.settle()
   const askpass = serve.argvs[0]?.[0] ?? ''
+  const shim = askpass.replace(/askpass$/, 'shim/ssh')
 
   return {
     clock,
@@ -60,8 +66,31 @@ async function world($: any, on: any) {
     /** Claude runs `command` with the Bash tool; sudo `sudoPid` runs inside that shell. */
     async bashCall(command: string, sudoPid: number) {
       await $.tool.call({ tool: 'Bash', command } as never)
-      const quoted = command.replaceAll(`'`, `'"'"'`)
+      const quoted = ranCommand.replaceAll(`'`, `'"'"'`)
       psTable = [`${sudoPid} 950 sudo`, `950 900 /bin/bash -c source /x && eval '${quoted}' < /dev/null`, '900 1 claude'].join('\n')
+    },
+    /**
+     * Helper `helperPid` asks through the relay (pid 4100) of the ssh wrapper (pid 3900),
+     * which runs `<shim> <wrapperArgs>`; the relay's args are `<sh> <relayArgs>`.
+     */
+    async relayRequest(
+      helperPid: number,
+      line: { prompt: string; via?: string; reported?: string },
+      options: { relayArgs?: string; wrapperArgs?: string } = {},
+    ) {
+      const relayArgs = `/bin/sh ${options.relayArgs ?? `${shim} --relay server`}`
+      ps.set(`helper:${helperPid}`, `4100 /bin/sh ${askpass} ${line.prompt}`)
+      ps.set('parent:4100', `alice ssh ${relayArgs}`)
+      // The relay is a script: its executable is the shell.
+      exes.set('4100', '0 /usr/bin/dash')
+      alive.add(helperPid)
+      alive.add(4100)
+      // The Bash tool's shell from `bashCall`, or one that ran something else.
+      const shell = psTable.split('\n').filter(row => row.startsWith('950 '))
+      const rows = [...(shell.length > 0 ? shell : ['950 900 /bin/bash -c x']), '900 1 claude']
+      psTable = [`4100 3900 ${relayArgs}`, `3900 950 /bin/sh ${shim} ${options.wrapperArgs ?? 'server sudo apt update'}`, ...rows].join('\n')
+      serve.emit(`${helperPid}\t${line.prompt}\t${line.via ?? ''}\t${line.reported ?? ''}\n`)
+      await clock.settle()
     },
     /**
      * Sets up helper `helperPid`, child of `parentPid`, asking with `prompt`; `exe` is the
@@ -552,6 +581,130 @@ test('password never leaks', async ($, on) => {
   await ui.input({ key: await passwordKey(ui), text: '•'.repeat(PASSWORD.length) })
   await w.clock.settle()
   const shown = [...w.rec.toasts, ...w.rec.logs].join('\n')
+  expect(shown.includes(PASSWORD.trim())).toBe(false)
+  expect(w.rec.runs.some(run => run.argv.some(arg => arg.includes(PASSWORD.trim())))).toBe(false)
+})
+
+const REMOTE_WARNING =
+  'A remote prompt can be raised by any program running as you. Answer only if you expected this command to need a password on this host.'
+const BOB_PROMPT = '[sudo] password for bob: '
+
+test('accepts a request relayed by the ssh wrapper', async ($, on) => {
+  const w = await world($, on)
+  await w.relayRequest(4242, { prompt: BOB_PROMPT, via: 'server', reported: 'sudo apt update' })
+  expect(w.rec.opens).toHaveLength(1)
+  const ui = await w.mount('terminal')
+  expect((await ui.find({ type: 'Text', text: /needs/ }))?.text).toBe('sudo on server needs your password')
+  expect(await ui.find({ type: 'Text', text: /^remote$/ })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /^\$ / }))?.text).toBe('$ sudo apt update (reported by server)')
+  expect(await ui.find({ type: 'Text', text: /^\[sudo\] password for bob$/ })).toBeDefined()
+  // No Bash call matched: the line still shows, so the person sees nothing vouches for it.
+  expect((await ui.find({ type: 'Text', text: /^Claude ran:/ }))?.text).toBe('Claude ran: (unknown)')
+  expect(await ui.find({ type: 'Text', text: REMOTE_WARNING })).toBeDefined()
+  expect((await ui.find({ key: await passwordKey(ui) })) !== undefined).toBe(true)
+  await typeMasked(ui, await passwordKey(ui), 'ab')
+  expect((await ui.find({ key: await passwordKey(ui) }))?.props.value).toBe('••')
+})
+
+test('labels a second hop', async ($, on) => {
+  const w = await world($, on)
+  await w.relayRequest(4242, { prompt: BOB_PROMPT, via: 'db01 via server', reported: '/usr/bin/sudo -A true' })
+  const ui = await w.mount('terminal')
+  expect((await ui.find({ type: 'Text', text: /needs/ }))?.text).toBe('sudo on db01 via server needs your password')
+})
+
+test('names an unreported program on the host', async ($, on) => {
+  const w = await world($, on)
+  await w.relayRequest(4242, { prompt: 'Password: ' })
+  const ui = await w.mount('terminal')
+  expect((await ui.find({ type: 'Text', text: /needs/ }))?.text).toBe('a program on server needs a password')
+  expect((await ui.find({ type: 'Text', text: /^\$ / }))?.text).toBe('$ (not reported by server)')
+})
+
+test('remote text loses its control characters', async ($, on) => {
+  const w = await world($, on)
+  await w.relayRequest(4242, { prompt: 'Pass\u001b[2Jword: ', via: 'db\u009b01', reported: 'sudo \u001b]0;x\u0007true' })
+  const ui = await w.mount('terminal')
+  // JSON writes C0 controls as \u00XX and leaves C1 controls as they are.
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(drawn.includes('\\u00')).toBe(false)
+  expect(/[\u007f-\u009f]/.test(drawn)).toBe(false)
+  expect((await ui.find({ type: 'Text', text: /needs/ }))?.text).toBe('sudo on db01 via server needs your password')
+})
+
+test('a remote username prompt is shown in clear, unless sudo reported it', async ($, on) => {
+  const w = await world($, on)
+  await w.relayRequest(4242, { prompt: "Username for 'https://x': ", reported: 'git pull' })
+  let ui = await w.mount('terminal')
+  await ui.input({ key: await passwordKey(ui), text: 'bob', kind: 'change' })
+  expect((await ui.find({ key: await passwordKey(ui) }))?.props.value).toBe('bob')
+  await ui.press({ key: 'cancel' })
+  await w.clock.settle()
+  await ui.unmount()
+  await w.relayRequest(4243, { prompt: "Username for 'https://x': ", reported: 'sudo -u bob git pull' })
+  ui = await w.mount('terminal')
+  await ui.input({ key: await passwordKey(ui), text: 'b', kind: 'change' })
+  expect((await ui.find({ key: await passwordKey(ui) }))?.props.value).toBe('•')
+})
+
+test('rejects a relay with a forged wrapper path', async ($, on) => {
+  const w = await world($, on)
+  await w.relayRequest(4242, { prompt: BOB_PROMPT, via: 'server' }, { relayArgs: '/tmp/x/bin/shim/ssh --relay server' })
+  expect(w.rec.opens).toEqual([])
+  expect(w.rec.toasts.filter(text => text.includes('Rejected askpass request'))).toHaveLength(1)
+  expect(w.replies().map(reply => reply.stdin)).toEqual(['\n'])
+})
+
+for (const wrapperArgs of ['other sudo apt update', '-p 22 evil server', '--relay server']) {
+  test(`rejects a relay whose parent is not the wrapper for its host (${wrapperArgs})`, async ($, on) => {
+    const w = await world($, on)
+    await w.relayRequest(4242, { prompt: BOB_PROMPT, via: 'server' }, { wrapperArgs })
+    expect(w.rec.opens).toEqual([])
+    expect(w.rec.toasts.filter(text => text.includes('Rejected askpass request'))).toHaveLength(1)
+    expect(w.replies().map(reply => reply.stdin)).toEqual(['\n'])
+  })
+}
+
+test('Claude ran matching ignores the PATH prefix', async ($, on) => {
+  const w = await world($, on)
+  await w.bashCall('ssh server sudo apt update', 0)
+  await w.relayRequest(4242, { prompt: BOB_PROMPT, via: 'server', reported: 'sudo apt update' })
+  const ui = await w.mount('terminal')
+  expect((await ui.find({ type: 'Text', text: /^Claude ran:/ }))?.text).toBe('Claude ran: ssh server sudo apt update')
+})
+
+test('closes a relayed request when its relay is gone', async ($, on) => {
+  const w = await world($, on)
+  await w.relayRequest(4242, { prompt: BOB_PROMPT, via: 'server', reported: 'sudo true' })
+  w.alive.delete(4100)
+  await w.clock.advance(2000)
+  expect(w.rec.closes).toContain('askpass')
+  expect(w.replies()).toEqual([])
+})
+
+test('a remote retry shows the sorry hint', async ($, on) => {
+  const w = await world($, on)
+  await w.relayRequest(4242, { prompt: BOB_PROMPT, via: 'server', reported: 'sudo true' })
+  let ui = await w.mount('terminal')
+  await ui.input({ key: await passwordKey(ui), text: '•' })
+  await w.clock.settle()
+  await ui.unmount()
+  await w.relayRequest(4243, { prompt: BOB_PROMPT, via: 'server', reported: 'sudo true' })
+  ui = await w.mount('terminal')
+  expect(await ui.find({ text: /Sorry, try again/ })).toBeDefined()
+})
+
+test('password never leaks from a relayed request', async ($, on) => {
+  const w = await world($, on)
+  await w.relayRequest(4242, { prompt: BOB_PROMPT, via: 'server', reported: 'sudo apt update' })
+  const ui = await w.mount('terminal')
+  await typeMasked(ui, await passwordKey(ui), PASSWORD)
+  await ui.input({ key: await passwordKey(ui), text: '•'.repeat(PASSWORD.length) })
+  await w.clock.settle()
+  expect(w.replies()).toEqual([
+    { argv: ['sh', '-c', REPLY_SCRIPT, '_', `${SESSION_DIR}/reply.4242`], stdin: `${PASSWORD}\n` },
+  ])
+  const shown = [...w.rec.toasts, ...w.rec.logs, ...w.rec.opens.map(open => open.title ?? '')].join('\n')
   expect(shown.includes(PASSWORD.trim())).toBe(false)
   expect(w.rec.runs.some(run => run.argv.some(arg => arg.includes(PASSWORD.trim())))).toBe(false)
 })

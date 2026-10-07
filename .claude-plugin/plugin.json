@@ -3,5 +3,20 @@
   "version": "0.1.0",
   "description": "Answer sudo/ssh askpass prompts from Claude's Bash commands with an in-app password pane",
   "author": { "name": "GoneTone" },
-  "license": "MIT"
+  "license": "MIT",
+  "userConfig": {
+    "remoteHosts": {
+      "type": "boolean",
+      "title": "Remote prompts over ssh",
+      "description": "Answer password prompts from hosts Claude reaches with ssh",
+      "default": true
+    },
+    "excludeHosts": {
+      "type": "string",
+      "multiple": true,
+      "title": "Hosts to leave alone",
+      "description": "Glob patterns of ssh hosts whose commands are never wrapped",
+      "default": []
+    }
+  }
 }

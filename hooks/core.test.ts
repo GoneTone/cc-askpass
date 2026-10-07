@@ -16,7 +16,10 @@ import {
   parseReady,
   parseRequest,
   relayHost,
+  relayParentArgs,
   remoteLabel,
+  stripControl,
+  wrapperTarget,
   promptLabel,
   wrappedLines,
   shouldMask,
@@ -71,6 +74,42 @@ test('remoteLabel ends with the verified host', () => {
   expect(remoteLabel('server', null)).toBe('server')
   expect(remoteLabel('server', 'db01')).toBe('db01 via server')
   expect(remoteLabel('server', 'db01 via evil')).toBe('db01 via evil via server')
+  // The wrapper names the hop it relays from: a single hop reads as just the host.
+  expect(remoteLabel('server', 'server')).toBe('server')
+  expect(remoteLabel('server', 'db01 via server')).toBe('db01 via server')
+})
+
+test('wrapperTarget reads the host the way the wrapper names it', () => {
+  const shim = '/opt/p q/bin/shim/ssh'
+  expect(wrapperTarget(`/bin/sh ${shim} server sudo apt update`, shim)).toBe('server')
+  expect(wrapperTarget(`/bin/sh ${shim} -p 22 -i k -o BatchMode=yes alice@server sudo x`, shim)).toBe('server')
+  expect(wrapperTarget(`/bin/sh ${shim} -tp22 -J jump server sudo x`, shim)).toBe('server')
+  expect(wrapperTarget(`/bin/sh ${shim} -t -- ssh://alice@server:2222 sudo x`, shim)).toBe('server')
+  expect(wrapperTarget(`/bin/sh ${shim} server:22 x`, shim)).toBe('server')
+  expect(wrapperTarget(`/bin/sh ${shim} fe80::1 x`, shim)).toBe('fe80::1')
+  expect(wrapperTarget(`${shim} -lalice server x`, shim)).toBe('server')
+  // An option's value is not the host.
+  expect(wrapperTarget(`/bin/sh ${shim} -p server`, shim)).toBe(null)
+  expect(wrapperTarget(`/bin/sh ${shim} --relay server`, shim)).toBe(null)
+  expect(wrapperTarget(`/bin/sh ${shim} -Z server x`, shim)).toBe(null)
+  expect(wrapperTarget(`/bin/sh /tmp/x/bin/shim/ssh server x`, shim)).toBe(null)
+  expect(wrapperTarget(`/bin/sh ${shim}`, shim)).toBe(null)
+  // Crafted to look like another host: words of the remote command do not count.
+  expect(wrapperTarget(`/bin/sh ${shim} evil ssh server`, shim)).toBe('evil')
+})
+
+test('relayParentArgs skips subshells that copy the relay', () => {
+  const table = parsePsTable(
+    ['4100 4099 sh shim --relay server', '4099 3900 sh shim --relay server', '3900 950 sh shim server x'].join('\n'),
+  )
+  expect(relayParentArgs(table, 4100)).toBe('sh shim server x')
+  expect(relayParentArgs(table, 3900)).toBe(null)
+  expect(relayParentArgs(table, 1)).toBe(null)
+})
+
+test('stripControl drops C0 and C1 controls, escape included', () => {
+  expect(stripControl('a\u001b[31mb\u0007c\u009bd\u007fe\tf')).toBe('a[31mbcdef')
+  expect(stripControl('sudo apt update')).toBe('sudo apt update')
 })
 
 test('parseHelperPs reads ppid and args', () => {
@@ -177,6 +216,9 @@ test('AnsweredPids forgets pids after 10 minutes', () => {
   expect(answered.has(7, 599_999)).toBe(true)
   expect(answered.has(7, 600_001)).toBe(false)
   expect(answered.has(8, 0)).toBe(false)
+  // Remote requests are keyed by host, relay and reported command.
+  answered.mark('server:4100:sudo true', 0)
+  expect(answered.has('server:4100:sudo true', 1)).toBe(true)
 })
 
 const TABLE = parsePsTable(
