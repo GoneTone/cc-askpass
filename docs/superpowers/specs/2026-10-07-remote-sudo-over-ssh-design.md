@@ -175,8 +175,14 @@ the previous hop, and so on to the user's machine.
 
 ### 4.5 Relay and reply
 
-- Relay channel: `ssh -S <ctl> host '<relay>'` with stdin `/dev/null`. The relay waits for the
-  token directory, writes `relay.pid`, and copies each line of the request FIFO to its stdout.
+- Relay channel: `ssh -S <ctl> host '<relay>'` with stdin `/dev/null`, its stdout into a 0600
+  FIFO `r.<wrapper pid>` in the session directory, which the wrapper's `--relay` process reads.
+  The remote relay waits for the token directory, writes `relay.pid`, and copies each verified
+  request line to its stdout; it exits on a sentinel line the bootstrap writes into the request
+  FIFO when the command ends (no `ps -p` needed, so BusyBox hosts are covered).
+- Every session the wrapper opens over its master besides the command itself (probe, relay,
+  reply) runs with `-F /dev/null -o BatchMode=yes -o ProxyCommand=false`, so a missing socket
+  fails instead of opening a new connection somewhere else.
 - For each line the wrapper runs `"$SSH_ASKPASS" "<prompt>"` with `CC_ASKPASS_VIA` and
   `CC_ASKPASS_REPORTED` set from the line (§4.6). `SSH_ASKPASS` is `bin/askpass` locally (set by
   the mod) and the token directory's `askpass` on a remote hop (set by the bootstrap), so the
@@ -232,7 +238,7 @@ the line's `<via>` (§4.6) names the chain (`db01 via server`); `server` is the 
 Before wrapping, over the master:
 
 ```
-ssh -S <ctl> host 'command -v mkfifo >/dev/null && command -v base64 >/dev/null && echo cc-askpass-probe-ok'
+ssh -S <ctl> host 'command -v mkfifo >/dev/null && command -v base64 >/dev/null && [ -x /bin/sh ] && echo cc-askpass-probe-ok'
 ```
 
 stdin `/dev/null`, 5 s timeout. Anything but the exact line counts as failure. A forced command
