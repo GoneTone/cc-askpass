@@ -112,6 +112,8 @@ let isListening = false
 // Bumped whenever a serve loop is replaced, so the old loop's end is not taken for a crash.
 let serveGeneration = 0
 let stopServe = () => {}
+// The running listener's loop, done once it has taken back what it set.
+let serving: Promise<void> = Promise.resolve()
 const queue: Request[] = []
 let current: Request | null = null
 let isAdvancing = false
@@ -618,6 +620,15 @@ async function startWindows($: EngineInterface): Promise<boolean> {
     $.ui.toast(`cc-askpass: could not run the Windows helper: ${error}`)
     return false
   }
+  // A second start replaces a running listener only now that its own helper runs. The old one
+  // ends first: ending later, it could take back the shim set below.
+  if (serveGeneration > 0) {
+    serveGeneration++
+    stopServe()
+    // Its last env writes land before they are taken back.
+    await serving
+    await endWinListener($)
+  }
   winOutDir = built.outDir
   const before = await $.env.get('BASH_FUNC_ssh%%')
   // An earlier load's function is ours; anything else is the person's and comes back later.
@@ -650,7 +661,8 @@ async function dropWinRequests($: EngineInterface): Promise<void> {
 
 /** Everything the Windows listener set, and its requests, gone with it. */
 async function endWinListener($: EngineInterface): Promise<void> {
-  await unsetEnv($)
+  // Its env only once it was ready: an inherited SSH_ASKPASS it never replaced stays.
+  if (isListening) await unsetEnv($)
   await dropWinRequests($)
   await removeWinShim($)
 }
@@ -724,13 +736,6 @@ export const register: Register = (on, options) => {
     // Under -p or the SDK nobody can answer a pane: leave sudo to fail at once as before.
     if (!e.isInteractive) return next(e)
     isWin = (await $.env.get('OS')) === 'Windows_NT'
-    // A second start replaces the listener. The old one ends here: ending later, it could take
-    // back the shim this start sets.
-    if (isWin && serveGeneration > 0) {
-      serveGeneration++
-      stopServe()
-      await endWinListener($)
-    }
     // Before the session's shell snapshot, which fixes PATH for every Bash command: a command
     // that changed PATH itself would lose the permission dialog's "don't ask again".
     if (isWin && !(await startWindows($))) return next(e)
@@ -743,7 +748,7 @@ export const register: Register = (on, options) => {
       description: 'Open the pending password prompt',
       immediate: true,
     })
-    void runServe($).catch(error => log($, `askpass listener failed: ${String(error)}`))
+    serving = runServe($).catch(error => log($, `askpass listener failed: ${String(error)}`))
     return started
   })
 

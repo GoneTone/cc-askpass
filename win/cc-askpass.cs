@@ -872,9 +872,11 @@ static class SshWrapper
         command.WaitForExit();
         int status = command.ExitCode;
         // The writer then closes R's stdin, and EOF ends R: remote.sh removes the token directory
-        // and exits. A writer stuck on R leaves R to the job, which ends it with this process.
+        // and exits. An R that has not ended by then (a writer stuck on it) is ended here.
         toRelay.CompleteAdding();
-        relay.WaitForExit(5000);
+        if (!relay.WaitForExit(5000)) Kill(relay);
+        // C ended by itself: what it left in the background stays, as for a pass-through.
+        Native.KeepJobProcesses();
         return status;
     }
 

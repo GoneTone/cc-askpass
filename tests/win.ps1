@@ -185,22 +185,30 @@ public static class FakeSsh
                 if (!File.Exists(log + ".stdin")) continue;
                 using (FileStream copy = new FileStream(log + ".stdin", FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                 using (StreamReader reader = new StreamReader(copy))
-                    if (Regex.IsMatch(reader.ReadToEnd(), "\n77\t[^\n]*\n")) return 3;
+                    if (Regex.IsMatch(reader.ReadToEnd(), "\n77\t[^\n]*\n"))
+                    {
+                        SpawnBackground();
+                        return 3;
+                    }
             }
             return 4;
         }
         // A plain ssh that keeps running, like a tunnel.
         if (mode == "sleep") Thread.Sleep(Timeout.Infinite);
-        // A plain ssh that leaves one running in the background, like a ControlPersist master.
-        if (mode == "spawn")
-        {
-            ProcessStartInfo background = new ProcessStartInfo(Assembly.GetEntryAssembly().Location, "background");
-            background.UseShellExecute = false;
-            background.EnvironmentVariables["FAKE_SSH_MODE"] = "sleep";
-            Process.Start(background).Dispose();
-        }
+        SpawnBackground();
         Console.Out.Write("fake-out\n");
         return 7;
+    }
+
+    // With FAKE_SSH_SPAWN=1, a plain ssh or C that ends leaves one running in the background,
+    // like a ControlPersist master.
+    static void SpawnBackground()
+    {
+        if (Environment.GetEnvironmentVariable("FAKE_SSH_SPAWN") != "1") return;
+        ProcessStartInfo background = new ProcessStartInfo(Assembly.GetEntryAssembly().Location, "background");
+        background.UseShellExecute = false;
+        background.EnvironmentVariables["FAKE_SSH_MODE"] = "sleep";
+        Process.Start(background).Dispose();
     }
 }
 '@
@@ -649,17 +657,38 @@ try {
     }
   }
 
+  # The fake ssh processes started after $before that are still running, ended once counted.
+  function Stop-NewFakes([int[]]$before) {
+    # Long enough for a job closing with the wrapper to have ended them.
+    Start-Sleep -Milliseconds 500
+    $new = @(Get-Process ssh -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $fake -and $before -notcontains $_.Id })
+    foreach ($process in $new) { $process.Kill(); $null = $process.WaitForExit(5000) }
+    $new.Count
+  }
+  function Get-FakeIds { @(Get-Process ssh -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $fake } | ForEach-Object { $_.Id }) }
+
   Test 'a pass-through ssh that ends leaves its background ssh running' {
-    $run = Start-Wrapper @('h') @{ FAKE_SSH_MODE = 'spawn'; CC_ASKPASS_WRAP = $null }
+    $before = Get-FakeIds
+    $run = Start-Wrapper @('h') @{ FAKE_SSH_SPAWN = '1'; CC_ASKPASS_WRAP = $null }
     Check $run.P.WaitForExit(5000) 'the wrapper did not end'
     Check ($run.P.ExitCode -eq 7) "the wrapper exited $($run.P.ExitCode): $(Get-Stderr $run)"
     for ($i = 0; $i -lt 50 -and (Get-Runs $run).Count -lt 2; $i++) { Start-Sleep -Milliseconds 100 }
-    # Long enough for a job closing with the wrapper to have ended it.
-    Start-Sleep -Milliseconds 500
-    $left = @(Get-Process ssh -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $fake })
-    foreach ($process in $left) { $process.Kill(); $null = $process.WaitForExit(5000) }
-    Check ($left.Count -eq 1) "$($left.Count) background ssh processes outlived the wrapper"
+    $left = Stop-NewFakes $before
+    Check ($left -eq 1) "$left background ssh processes outlived the wrapper"
     Check ((Get-Stderr $run) -notmatch 'job object') "a pass-through warned: $(Get-Stderr $run)"
+  }
+
+  Test 'a relayed command that ends leaves its background ssh running, not R' {
+    $before = Get-FakeIds
+    $run = Start-Wrapper @('server', 'sudo', 'true') @{ FAKE_SSH_MODE = 'relay'; FAKE_SSH_SPAWN = '1' }
+    $request = Read-Request $serve 10000
+    Send-Reply $serve $request.id 'pw'
+    Check $run.P.WaitForExit(10000) 'the wrapper did not end'
+    Check ($run.P.ExitCode -eq 3) "the wrapper exited $($run.P.ExitCode)"
+    # R, C and the background one.
+    for ($i = 0; $i -lt 50 -and (Get-Runs $run).Count -lt 3; $i++) { Start-Sleep -Milliseconds 100 }
+    $left = Stop-NewFakes $before
+    Check ($left -eq 1) "$left ssh processes outlived the wrapper"
   }
 
   Test 'an R that stops reading cannot hold the wrapper' {

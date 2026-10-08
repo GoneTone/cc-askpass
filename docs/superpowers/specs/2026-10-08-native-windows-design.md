@@ -271,7 +271,8 @@ Linux, macOS and WSL keep A's ControlMaster design. On Windows `shim\ssh.exe` do
    hang-up as in A. A pass-through ssh runs in the same job, as `exec` leaves no wrapper
    behind on Linux (a killed `ssh -N -L` frees its port), except when it forks (`-f`,
    `-o ForkAfterAuthentication=yes`) and must outlive the wrapper. When a pass-through ssh
-   ends by itself the wrapper lifts the kill-on-close limit first, so what ssh left in the
+   (or C, once R has ended or been ended) ends by itself the wrapper lifts the kill-on-close
+   limit first, so what ssh left in the
    background (a ControlPersist master, a config's ForkAfterAuthentication) keeps running. A
    job that cannot be set up warns only when the wrapper relays; a pass-through is then plain ssh.
 
@@ -305,7 +306,7 @@ only (no local sudo).
 | The built exe cannot run (AppLocker, WDAC, Defender) | Found by running it once before PATH and `BASH_FUNC_ssh%%` are touched (§5.3 step 2): toast `cc-askpass: could not run the Windows helper: <reason>`, nothing set, no listener; Claude's commands behave as without the mod |
 | Pipe name taken by another process | The listener fails: toast, mod off, the shim taken back off PATH and `BASH_FUNC_ssh%%` unset |
 | Listener ends mid-session | `SSH_ASKPASS` and `CC_ASKPASS_WRAP` unset, the shim taken back off PATH and `BASH_FUNC_ssh%%` unset (or put back to the person's own exported `ssh` function, if one was there); a wrapper still reached (the Bash tool's snapshot keeps the function) passes through |
-| `session.start` again in one load | The old listener and everything it set end first, so its late end cannot take back the new shim |
+| `session.start` again in one load | Once the new helper is built and runs, the old listener and everything it set end first (its env only if it was ready), so its late end cannot take back the new shim; a new start that fails leaves the old listener running |
 | Sessions build the same helper at once | Builds take turns; each ends with a working exe |
 | Pass-through ssh when the wrapper is killed | Ends with it (a job object, as `exec` on Linux), unless it forks (`-f`, `-o ForkAfterAuthentication=yes`) |
 | Askpass cannot reach the pipe (mod disabled) | Message on stderr, exit 1; ssh behaves as without askpass |

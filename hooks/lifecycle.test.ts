@@ -382,7 +382,7 @@ async function winWorld(
     source?: string | null
     env?: Record<string, string>
     build?: Partial<ProcessRunResult> | { deny: string }
-    check?: Partial<ProcessRunResult>
+    check?: Partial<ProcessRunResult> | (() => Partial<ProcessRunResult> | undefined)
   } = {},
 ) {
   const clock = mock.clock(on)
@@ -390,7 +390,8 @@ async function winWorld(
   const serve = fakeServe(on)
   const rec = recorder(on, argv => {
     if (argv[0] === POWERSHELL) return options.build
-    return argv.length === 1 && argv[0]?.endsWith('\\cc-askpass.exe') ? options.check : undefined
+    if (argv.length !== 1 || !argv[0]?.endsWith('\\cc-askpass.exe')) return undefined
+    return typeof options.check === 'function' ? options.check() : options.check
   })
   await $.session.start(START)
   await clock.settle()
@@ -506,6 +507,27 @@ test('a second Windows start keeps its shim when the old listener gives up meanw
   expect(w.rec.envValue('BASH_FUNC_ssh%%')).toBeDefined()
   expect(w.rec.envValue('CC_ASKPASS_PIPE')).toBe(WIN_PIPE)
   expect(w.rec.toasts).toEqual([])
+})
+
+test('a second Windows start whose helper cannot run keeps the running listener', async ($, on) => {
+  let checks = 0
+  const w = await winWorld($, on, { check: () => (checks++ > 0 ? { exitCode: 1, stderr: 'blocked\r\n' } : undefined) })
+  await w.ready()
+  await $.session.start(START)
+  await w.clock.settle()
+  expect(w.serve.argvs).toHaveLength(1)
+  expect(w.rec.envValue('CC_ASKPASS_PIPE')).toBe(WIN_PIPE)
+  expect(w.rec.envValue('PATH')).toBe(`${w.outDir}\\shim;${WIN_PATH}`)
+  expect(w.rec.toasts).toEqual(['cc-askpass: could not run the Windows helper: blocked'])
+  expect(await sudoNote($)).toBeDefined()
+})
+
+test('replacing a Windows listener that never became ready leaves an inherited SSH_ASKPASS alone', async ($, on) => {
+  const w = await winWorld($, on, { env: { SSH_ASKPASS: 'C:\\own\\askpass.exe' } })
+  await $.session.start(START)
+  await w.clock.settle()
+  expect(w.serve.argvs).toHaveLength(2)
+  expect(w.rec.envSets.some(set => set.name === 'SSH_ASKPASS')).toBe(false)
 })
 
 test('Windows starts the listener from the built exe', async ($, on) => {
