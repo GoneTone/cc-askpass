@@ -160,7 +160,14 @@ Before `next(e)`, as on Linux, and only with a person at the prompt:
    `win/out/*` directories, skipping files still locked by running processes. Windows
    PowerShell 5.1 is always used, whatever the tools run.
 2. Put `win\out\<hash>\shim` first on PATH (`;`-separated, once: a reload finds it there). It
-   holds only `ssh.exe`, which both Git Bash and PowerShell find for `ssh`.
+   holds only `ssh.exe`, which PowerShell and native programs find for `ssh`. Git Bash's
+   `/etc/profile` puts its own directories (`/usr/bin` among them) before the inherited PATH,
+   so for bash the mod also sets the environment variable `BASH_FUNC_ssh%%` to
+   `() {  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "<shim ssh.exe, forward slashes>" "$@"
+}`:
+   every bash (the Bash tool, `bash -c`, `sh -c`, scripts) imports it as an `ssh` function. The
+   two variables stop Git Bash from rewriting POSIX-looking arguments (`/etc/x`) into Windows
+   paths on the way to a native program, which Git's own ssh would never see.
 3. Start `cc-askpass.exe serve <session id>` with `$.process.spawn`.
 4. On its ready line set `CC_ASKPASS_PIPE`, `SSH_ASKPASS` (the exe's path),
    `SSH_ASKPASS_REQUIRE=force` and `CC_ASKPASS_WRAP` (as on Linux). `SUDO_ASKPASS` and `DISPLAY`
@@ -314,12 +321,19 @@ only (no local sudo).
   passphrase, password login, remote sudo, a further hop; `Asked by:` wording; Ctrl+C clean-up;
   mod reload.
 
-## 11. To verify first (first plan task)
+## 11. Verified before building (2026-10-08)
 
-- Git Bash's snapshot converts a `;`-separated Windows PATH set at session start.
-- Git's ssh, started from a native process with every argument quoted, expands nothing.
-- `win\out\<hash>\shim\ssh.exe` wins over `C:\Windows\System32\OpenSSH\ssh.exe` in both tools.
-- The build and helper on ARM64 (AnyCPU), if hardware is at hand; otherwise listed as untested.
+- PATH set at session start reaches the PowerShell tool first after pwsh's own directory:
+  `ssh` resolves to the shim. In the Bash tool it does not come first: Git Bash's
+  `/etc/profile` puts `/c/Users/<user>/bin`, `/mingw64/bin`, `/usr/local/bin`, `/usr/bin` ahead
+  of it, so `/usr/bin/ssh` wins. An exported function through `BASH_FUNC_ssh%%` set at session
+  start reaches the Bash tool, `bash -c`, `sh -c` and bash scripts (§5.3).
+- Native programs started from Git Bash get POSIX-looking arguments rewritten
+  (`/etc/init.d/x` → `C:/Program Files/Git/etc/init.d/x`); `MSYS_NO_PATHCONV=1` and
+  `MSYS2_ARG_CONV_EXCL='*'` stop it.
+- Git's ssh started from a native process expands unquoted wildcards (`*` became a file name
+  in the working directory); quoted arguments arrive intact (`"*"`, `"a*b"`, `"a\"b"`).
+- ARM64: no hardware at hand; untested.
 
 ## 12. Changes to earlier designs
 
