@@ -130,7 +130,7 @@ if you know which program is asking." The reply then goes where the request said
 win/cc-askpass.cs   C# source, one program, its mode chosen by name and arguments:
                       cc-askpass.exe serve <session id>   listener, started by the mod
                       cc-askpass.exe <prompt>             askpass, started by ssh/git
-                      cc-askpass.exe reply                the mod's way back to the listener
+                      cc-askpass.exe --reply              the mod's way back to the listener
                       ssh.exe <ssh arguments>             ssh wrapper (§6)
 win/build.ps1       compiles win/cc-askpass.cs into win/out/<hash>/cc-askpass.exe and copies
                     it to win/out/<hash>/shim/ssh.exe
@@ -156,21 +156,33 @@ Before `next(e)`, as on Linux, and only with a person at the prompt:
    `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive
    -ExecutionPolicy Bypass -File win\build.ps1 <source> <out dir>` (60 s timeout). It compiles
    with `Add-Type -TypeDefinition … -OutputAssembly … -OutputType ConsoleApplication`, writes
-   to a temporary name and renames, so a half-written exe is never used, then removes other
-   `win/out/*` directories, skipping files still locked by running processes. Windows
-   PowerShell 5.1 is always used, whatever the tools run.
-2. Put `win\out\<hash>\shim` first on PATH (`;`-separated, once: a reload finds it there). It
+   to a temporary name of its own (`cc-askpass.<pid>.tmp.exe`) and renames, so a half-written
+   exe is never used. Builds into one directory (sessions starting at once) take turns under a
+   named mutex, and one that finds `cc-askpass.exe` already there is done; the mod also takes
+   a failed build as done when `cc-askpass.exe` exists afterwards. It then removes other
+   `win/out/*` directories, skipping files still locked by running processes; that clean-up
+   never fails a finished build. Windows PowerShell 5.1 is always used, whatever the tools run.
+2. Run the built `cc-askpass.exe` once, bare and with `CC_ASKPASS_PIPE` empty: a helper that
+   runs exits 1 saying `CC_ASKPASS_PIPE is not set`. Anything else (AppLocker, WDAC or an
+   antivirus blocking it) toasts `cc-askpass: could not run the Windows helper: <reason>` and
+   stops here: nothing below is set, so ssh never meets a shim that cannot run.
+3. Put `win\out\<hash>\shim` first on PATH (`;`-separated, once: a reload finds it there). It
    holds only `ssh.exe`, which PowerShell and native programs find for `ssh`. Git Bash's
    `/etc/profile` puts its own directories (`/usr/bin` among them) before the inherited PATH,
    so for bash the mod also sets the environment variable `BASH_FUNC_ssh%%` to
-   `() {  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "<shim ssh.exe, forward slashes>" "$@"\n}`:
-   every bash (the Bash tool, `bash -c`, `sh -c`, scripts) imports it as an `ssh` function. The
-   two variables stop Git Bash from rewriting POSIX-looking arguments (`/etc/x`) into Windows
-   paths on the way to a native program, which Git's own ssh would never see.
-3. Start `cc-askpass.exe serve <session id>` with `$.process.spawn`.
-4. On its ready line set `CC_ASKPASS_PIPE`, `SSH_ASKPASS` (the exe's path),
+   `() {  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' '<shim ssh.exe, forward slashes>' "$@"\n}`
+   (single quotes, a `'` in the path written `'\''`: `$` and backticks are legal in Windows
+   user names and `CLAUDE_CONFIG_DIR`): every bash (the Bash tool, `bash -c`, `sh -c`, scripts)
+   imports it as an `ssh` function. The two variables stop Git Bash from rewriting
+   POSIX-looking arguments (`/etc/x`) into Windows paths on the way to a native program, which
+   Git's own ssh would never see.
+4. Start `cc-askpass.exe serve <session id>` with `$.process.spawn`.
+5. On its ready line set `CC_ASKPASS_PIPE`, `SSH_ASKPASS` (the exe's path),
    `SSH_ASKPASS_REQUIRE=force` and `CC_ASKPASS_WRAP` (as on Linux). `SUDO_ASKPASS` and `DISPLAY`
    are not set.
+6. When the listener never becomes ready or ends, the mod also takes the shim back off PATH
+   and unsets `BASH_FUNC_ssh%%`. The PowerShell tool sees that at once; the Bash tool's shell
+   snapshot keeps the function, whose wrapper passes through since `CC_ASKPASS_WRAP` is unset.
 
 ### 5.4 Listener (`serve`)
 
@@ -179,8 +191,12 @@ Before `next(e)`, as on Linux, and only with a person at the prompt:
   unlimited instances; a second pipe of the same name plus `-reply` for replies. A restart
   (mod reload) reuses the names; creation retries for 5 s while the old listener's instances
   close, then fails.
-- Prints `ready<TAB><pipe name><TAB><token>` (token: 32 hex digits from a CSPRNG) once both
-  pipes exist. All output is UTF-8 with `\n`.
+- Prints `ready<TAB><pipe name><TAB><token><TAB><helper path>` (token: 32 hex digits from a
+  CSPRNG) once both pipes exist. The helper path is the listener's own image
+  (`QueryFullProcessImageNameW`), which the kernel gives with junctions and subst drives
+  resolved, as it gives the clients' paths: the mod knows our helper and `<its dir>\shim\ssh.exe`
+  by it (case- and slash-insensitive), not by the path it built under, and rejects a ready line
+  without it. All output, stderr included, is UTF-8 with `\n`.
 - For each connection on the request pipe: the client pid from `GetNamedPipeClientProcessId`;
   its executable (`QueryFullProcessImageNameW`); its parent pid (Toolhelp snapshot), the
   parent's executable and command line (`NtQueryInformationProcess`,
@@ -209,7 +225,9 @@ Before `next(e)`, as on Linux, and only with a person at the prompt:
   and newlines as spaces, cut to 1000 bytes), waits for one line, prints it, exits 0; an empty
   line exits 1. If the connection breaks before a reply (listener restart) it reconnects and
   sends again; it gives up after 10 minutes, the Bash tool's longest timeout.
-- Reply (`cc-askpass.exe reply`): copies its stdin to the reply pipe. The mod runs it with
+- Reply (`cc-askpass.exe --reply`): copies its stdin to the reply pipe. It is an option, not a
+  word: ssh passes askpass the prompt as its one argument, and a server chooses the prompt
+  (one that reads `reply` is an ordinary request). The mod runs it with
   `$.process.run(argv, { stdin })`: the engine's spawn takes input only at start, so the
   long-lived listener cannot receive it on stdin.
 
@@ -249,7 +267,9 @@ Linux, macOS and WSL keep A's ControlMaster design. On Windows `shim\ssh.exe` do
    directory and exits. The wrapper exits with C's status.
 7. **Interrupts**: R and C run in a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so
    killing the wrapper (Bash tool timeout, Ctrl+C) ends both; the remote trap cleans up on
-   hang-up as in A.
+   hang-up as in A. A pass-through ssh runs in the same job, as `exec` leaves no wrapper
+   behind on Linux (a killed `ssh -N -L` frees its port), except when it forks (`-f`,
+   `-o ForkAfterAuthentication=yes`) and must outlive the wrapper.
 
 Arguments reach the real ssh through a command line built with the standard Windows quoting
 rules, every argument quoted: .NET Framework 4.8 has no `ArgumentList`, and Git's ssh (a
@@ -278,9 +298,11 @@ only (no local sudo).
 | Situation | Behaviour |
 |---|---|
 | Build fails (`Add-Type` blocked, no .NET Framework 4.8, ExecutionPolicy forced by policy) | Toast `cc-askpass: could not build the Windows helper: <reason>`; the mod stays off; Claude's commands behave as without it |
-| The built exe cannot run (AppLocker, WDAC, Defender) | The listener does not start: toast with the reason, mod off |
-| Pipe name taken by another process | The listener fails: toast, mod off |
-| Listener ends mid-session | `SSH_ASKPASS` and `CC_ASKPASS_WRAP` unset; the wrapper passes through |
+| The built exe cannot run (AppLocker, WDAC, Defender) | Found by running it once before PATH and `BASH_FUNC_ssh%%` are touched (§5.3 step 2): toast `cc-askpass: could not run the Windows helper: <reason>`, nothing set, no listener; Claude's commands behave as without the mod |
+| Pipe name taken by another process | The listener fails: toast, mod off, the shim taken back off PATH and `BASH_FUNC_ssh%%` unset |
+| Listener ends mid-session | `SSH_ASKPASS` and `CC_ASKPASS_WRAP` unset, the shim taken back off PATH and `BASH_FUNC_ssh%%` unset; a wrapper still reached (the Bash tool's snapshot keeps the function) passes through |
+| Sessions build the same helper at once | Builds take turns; each ends with a working exe |
+| Pass-through ssh when the wrapper is killed | Ends with it (a job object, as `exec` on Linux), unless it forks (`-f`, `-o ForkAfterAuthentication=yes`) |
 | Askpass cannot reach the pipe (mod disabled) | Message on stderr, exit 1; ssh behaves as without askpass |
 | No real ssh after the shim | Error on stderr, exit 255 |
 | Non-ASCII paths, names, prompts | UTF-16 arguments and pipes; UTF-8 output to the mod; `\r\n` tolerated |
@@ -307,12 +329,15 @@ only (no local sudo).
 - `hooks/core.test.ts`: `Asked by:` for each row of §4's table; Windows JSON request parsing;
   `withShim` with `;`; removed trust tests deleted.
 - `hooks/lifecycle.test.ts`: with `OS=Windows_NT`, the build runs only when the exe is
-  missing; PATH, environment and listener argv; a failed build toasts and sets nothing;
-  PowerShell tool commands are recorded.
+  missing; PATH, environment and listener argv; a failed build or a helper that cannot run
+  toasts and sets nothing; a listener that never becomes ready or ends takes the shim back off
+  PATH and out of bash; PowerShell tool commands are recorded.
 - `hooks/pane.test.ts`: the `Asked by:` line and the unverified warning.
 - `tests/win.ps1` (Windows): build; listener plus both ssh-keygens with an encrypted key; a
   prompt with `"&%^!` arrives intact; a wrong reply token is ignored; askpass reconnects after a
-  listener restart; the wrapper's wrap/pass-through decisions (A's `tests/ssh.sh` table).
+  listener restart; the wrapper's wrap/pass-through decisions (A's `tests/ssh.sh` table);
+  parallel builds; UTF-8 error text; a listener started through a junction; a killed
+  pass-through wrapper ends its ssh unless it forks.
 - `tests/ssh.sh`, `tests/askpass.sh`: follow §4 (no remote `verify`, no `exe-of` payload).
 - CI: `windows-latest` joins the matrix (validate, plugin test, `tests/win.ps1`). Windows
   runners cannot run a POSIX sshd for the remote tests, so remote end-to-end runs by hand.

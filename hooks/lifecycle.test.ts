@@ -3,7 +3,17 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { ProcessRunResult } from 'claude-code'
 
 import { fnv1a64 } from './core'
-import { SESSION_DIR, SESSION_ID, WIN_PATH, WIN_PIPE, WIN_SOURCE, WIN_TOKEN, fakeServe, recorder, windowsWorld } from './testkit'
+import {
+  SESSION_DIR,
+  SESSION_ID,
+  WIN_PATH,
+  WIN_PIPE,
+  WIN_SOURCE,
+  WIN_TOKEN,
+  fakeServe,
+  recorder,
+  windowsWorld,
+} from './testkit'
 
 const START = { cwd: '/w', surface: 'terminal', isInteractive: true } as const
 const ASKPASS_VARS = ['CC_ASKPASS_DIR', 'CC_ASKPASS_EXCLUDE', 'CC_ASKPASS_WRAP', 'SUDO_ASKPASS', 'SSH_ASKPASS', 'SSH_ASKPASS_REQUIRE']
@@ -360,26 +370,40 @@ test('CC_ASKPASS_EXCLUDE is empty by default', async ($, on) => {
 const BUILD_ARGS = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File']
 const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
 
-/** A native Windows session started with a person at the prompt; the build exits as `build` says. */
+/**
+ * A native Windows session started with a person at the prompt; the build exits as `build` says,
+ * and the built helper, run bare to see that it runs at all, as `check` says.
+ */
 async function winWorld(
   $: any,
   on: any,
-  options: { isBuilt?: boolean; source?: string | null; build?: Partial<ProcessRunResult> } = {},
+  options: {
+    isBuilt?: boolean | (() => boolean)
+    source?: string | null
+    build?: Partial<ProcessRunResult>
+    check?: Partial<ProcessRunResult>
+  } = {},
 ) {
   const clock = mock.clock(on)
   const win = windowsWorld(on, options)
   const serve = fakeServe(on)
-  const rec = recorder(on, argv => (argv[0] === POWERSHELL ? options.build : undefined))
+  const rec = recorder(on, argv => {
+    if (argv[0] === POWERSHELL) return options.build
+    return argv.length === 1 && argv[0]?.endsWith('\\cc-askpass.exe') ? options.check : undefined
+  })
   await $.session.start(START)
   await clock.settle()
+  const outDir = `${win.root()}\\win\\out\\${fnv1a64(WIN_SOURCE)}`
   return {
+    clock,
     rec,
     serve,
     root: win.root(),
-    outDir: `${win.root()}\\win\\out\\${fnv1a64(WIN_SOURCE)}`,
+    outDir,
+    exe: `${outDir}\\cc-askpass.exe`,
     builds: () => rec.runs.filter(run => run.argv[0] === POWERSHELL),
     async ready() {
-      serve.emit(`ready\t${WIN_PIPE}\t${WIN_TOKEN}\n`)
+      serve.emit(`ready\t${WIN_PIPE}\t${WIN_TOKEN}\t${outDir}\\cc-askpass.exe\n`)
       await clock.settle()
     },
     async stop() {
@@ -409,11 +433,51 @@ test('Windows puts the shim first with ;', async ($, on) => {
 test('Windows defines the bash ssh function', async ($, on) => {
   const w = await winWorld($, on)
   const ssh = `${w.outDir}\\shim\\ssh.exe`.replaceAll('\\', '/')
-  expect(w.rec.envValue('BASH_FUNC_ssh%%')).toBe(`() {  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "${ssh}" "$@"\n}`)
+  expect(w.rec.envValue('BASH_FUNC_ssh%%')).toBe(`() {  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' '${ssh}' "$@"\n}`)
+})
+
+test('Windows runs the built helper once before it touches PATH', async ($, on) => {
+  const w = await winWorld($, on)
+  // Bare and without the pipe: a helper that runs says CC_ASKPASS_PIPE is not set.
+  expect(w.rec.runs.filter(run => run.argv[0] === w.exe)).toEqual([{ argv: [w.exe], env: { CC_ASKPASS_PIPE: '' } }])
+  expect(w.rec.envSets.map(set => set.name)).toEqual(['BASH_FUNC_ssh%%', 'PATH'])
+})
+
+for (const [what, check] of [
+  ['is blocked', { exitCode: 1, stderr: 'This program is blocked by group policy.\r\n' }],
+  ['exits 0', { exitCode: 0, stderr: '' }],
+  ['fails without its message', { exitCode: 1, stderr: '' }],
+] as const) {
+  test(`a Windows helper that ${what} toasts and changes nothing`, async ($, on) => {
+    const w = await winWorld($, on, { check })
+    expect(w.rec.toasts).toHaveLength(1)
+    expect(w.rec.toasts[0]).toMatch(/^cc-askpass: could not run the Windows helper: \S/)
+    expect(w.rec.envSets).toEqual([])
+    expect(w.serve.argvs).toEqual([])
+    expect(await sudoNote($)).toBeUndefined()
+  })
+}
+
+test('a blocked Windows helper names the reason', async ($, on) => {
+  const w = await winWorld($, on, { check: { exitCode: 1, stderr: 'This program is blocked by group policy.\r\n' } })
+  expect(w.rec.toasts).toEqual(['cc-askpass: could not run the Windows helper: This program is blocked by group policy.'])
+})
+
+test('a Windows listener that never becomes ready takes the shim back off', async ($, on) => {
+  const w = await winWorld($, on)
+  expect(w.rec.envValue('PATH')).toBe(`${w.outDir}\\shim;${WIN_PATH}`)
+  await w.clock.advance(5000)
+  expect(w.rec.toasts).toHaveLength(1)
+  expect(w.rec.envValue('PATH')).toBe(WIN_PATH)
+  expect(w.rec.envValue('BASH_FUNC_ssh%%')).toBe(undefined)
+})
+
+test('a Windows listener that ends takes the shim back off', async ($, on) => {
+  const w = await winWorld($, on)
   await w.ready()
   await w.stop()
-  // Never unset, like the PATH entry: the wrapper steps aside on its own.
-  expect(w.rec.envSets.filter(set => set.name === 'BASH_FUNC_ssh%%').map(set => set.value === undefined)).toEqual([false])
+  expect(w.rec.envValue('PATH')).toBe(WIN_PATH)
+  expect(w.rec.envValue('BASH_FUNC_ssh%%')).toBe(undefined)
 })
 
 test('Windows starts the listener from the built exe', async ($, on) => {
@@ -445,6 +509,16 @@ test('a failed build toasts and changes nothing', async ($, on) => {
   expect(w.rec.envSets).toEqual([])
   expect(w.serve.argvs).toEqual([])
   expect(await sudoNote($)).toBeUndefined()
+})
+
+test('a build that fails after another session built the helper counts as built', async ($, on) => {
+  // Missing before the build; there after it, written by a build that ran beside this one.
+  let checks = 0
+  const isBuilt = () => checks++ > 0
+  const w = await winWorld($, on, { isBuilt, build: { exitCode: 1, stderr: 'cc-askpass: build failed: in use\r\n' } })
+  expect(w.builds()).toHaveLength(1)
+  expect(w.rec.toasts).toEqual([])
+  expect(w.serve.argvs).toEqual([[w.exe, 'serve', SESSION_ID]])
 })
 
 test('a missing helper source counts as a failed build', async ($, on) => {
@@ -479,5 +553,6 @@ test('Windows session.end removes nothing', async ($, on) => {
   const w = await winWorld($, on)
   await w.ready()
   await $.session.end({ reason: 'prompt_input_exit' } as never)
-  expect(w.rec.runs).toEqual([])
+  // Only the session start's check that the helper runs.
+  expect(w.rec.runs.map(run => run.argv)).toEqual([[w.exe]])
 })

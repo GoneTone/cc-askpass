@@ -82,6 +82,20 @@ export function withShim(path: string | undefined, dir: string, separator: ':' |
   return path.split(separator).includes(dir) ? null : `${dir}${separator}${path}`
 }
 
+/** `path` without `dir`: the Windows shim taken back off when the listener is gone. */
+export function withoutShim(path: string | undefined, dir: string, separator: ':' | ';'): string | undefined {
+  return path?.split(separator).filter(entry => entry !== dir).join(separator)
+}
+
+/**
+ * The `ssh` function every Git Bash imports from `BASH_FUNC_ssh%%`: it runs our wrapper with
+ * MSYS path conversion off. The path is single-quoted: `$` and backticks are legal in it.
+ */
+export function bashSshFunction(shimExe: string): string {
+  const quoted = `'${shimExe.replaceAll('\\', '/').replaceAll("'", `'\\''`)}'`
+  return `() {  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' ${quoted} "$@"\n}`
+}
+
 /**
  * 64-bit FNV-1a of `text`'s UTF-16 code units, low byte first, as 16 hex digits: names the
  * Windows helper's build after its source.
@@ -95,10 +109,13 @@ export function fnv1a64(text: string): string {
   return hash.toString(16).padStart(16, '0')
 }
 
-/** The Windows listener's first line, `ready<TAB><pipe name><TAB><32-digit token>`. */
-export function parseWinReady(line: string): { pipe: string; token: string } | null {
-  const [, pipe, token] = /^ready\t(cc-askpass-[^\t\\]+)\t([0-9a-f]{32})\r?$/.exec(line) ?? []
-  return pipe === undefined || token === undefined ? null : { pipe, token }
+/**
+ * The Windows listener's first line, `ready<TAB><pipe name><TAB><32-digit token><TAB><helper path>`:
+ * the path is the listener's own image as the kernel names it, as it names the clients.
+ */
+export function parseWinReady(line: string): { pipe: string; token: string; exe: string } | null {
+  const [, pipe, token, exe] = /^ready\t(cc-askpass-[^\t\\]+)\t([0-9a-f]{32})\t([^\t\r]+)\r?$/.exec(line) ?? []
+  return pipe === undefined || token === undefined || exe === undefined ? null : { pipe, token, exe }
 }
 
 /** A request as the Windows listener describes it: who connected (pid from the kernel) and what it asked. */
@@ -148,11 +165,13 @@ const isSamePath = (a: string, b: string): boolean =>
   a.replaceAll('/', '\\').toLowerCase() === b.replaceAll('/', '\\').toLowerCase()
 
 /**
- * Who a Windows request says asked: through our helper, the program that started it; through
- * our ssh wrapper, its relay; anything else, the client itself, unverified.
+ * Who a Windows request says asked: through our helper (`helperExe`, the path the listener
+ * reported for itself), the program that started it; through our ssh wrapper beside it, its
+ * relay; anything else, the client itself, unverified.
  */
-export function winAskSource(request: WinRequest, helperExe: string, shimExe: string): AskSource {
+export function winAskSource(request: WinRequest, helperExe: string): AskSource {
   const { client, parent, relay } = request
+  const shimExe = helperExe.replace(/[^\\/]*$/, 'shim\\ssh.exe')
   // File names may hold bidi and format characters: a path shown to expose a program must not
   // disguise it. The host comes from the wrapper's arguments, which Claude chose.
   if (isSamePath(client.exe, helperExe)) {
@@ -161,15 +180,16 @@ export function winAskSource(request: WinRequest, helperExe: string, shimExe: st
   if (isSamePath(client.exe, shimExe) && relay !== null) {
     return { kind: 'relay', host: stripControl(relay.host), realSsh: stripControl(relay.realSsh) }
   }
-  return { kind: 'unverified', exe: stripControl(client.exe) }
+  // An image path the listener could not read arrives empty.
+  return { kind: 'unverified', exe: stripControl(client.exe) || null }
 }
 
 /**
  * A Windows request's Requester, naming the process `Asked by:` names: the program behind our
  * helper, or else the client. `remote` is left to the caller, which cleans the relay's text.
  */
-export function winRequester(request: WinRequest, helperExe: string, shimExe: string): Requester {
-  const askedBy = winAskSource(request, helperExe, shimExe)
+export function winRequester(request: WinRequest, helperExe: string): Requester {
+  const askedBy = winAskSource(request, helperExe)
   const { client, parent } = request
   const asker = askedBy.kind === 'program' && parent !== null ? parent : client
   const args = stripControl(parent?.args ?? '')
@@ -206,7 +226,10 @@ export function winClaudeCommand(
  * disguise itself.
  */
 export function stripControl(text: string): string {
-  return text.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, '')
+  return text.replace(
+    /[\u0000-\u001f\u007f-\u009f\u061c\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g,
+    '',
+  )
 }
 
 /** Output of `ps -o ppid=,args= -p <helper pid>`; the args keep the prompt's trailing space. */

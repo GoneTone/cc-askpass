@@ -5,6 +5,7 @@ import {
   AnsweredPids,
   applyMaskedInput,
   bashShellArgs,
+  bashSshFunction,
   claudePidOf,
   clipLines,
   matchBashCommand,
@@ -22,6 +23,7 @@ import {
   remoteLabel,
   stripControl,
   withShim,
+  withoutShim,
   wrappedLines,
   shouldMask,
   splitLines,
@@ -93,9 +95,9 @@ let askpassPath = ''
 let sessionDir = ''
 // Native Windows (spec §5): a built helper and a named pipe instead of `sh`, `ps` and FIFOs.
 let isWin = false
-// Windows: the build directory, and the listener's pipe and reply token once it is ready.
+// Windows: the build directory, and the listener's pipe, reply token and own image path once it is ready.
 let winOutDir = ''
-let winListener = { pipe: '', token: '' }
+let winListener = { pipe: '', token: '', exe: '' }
 // Windows requests whose asker went away; the listener says so instead of `kill -0`.
 const goneIds = new Set<number>()
 // The commands of PowerShell tool calls running now: the tool puts them on no command line.
@@ -158,7 +160,8 @@ async function verifyWin($: EngineInterface, line: string, generation: number): 
     goneIds.add(parsed.gone)
     return
   }
-  const requester = winRequester(parsed, askpassPath, `${winOutDir}\\shim\\ssh.exe`)
+  // The kernel names a client by its resolved image path, as it named the listener itself.
+  const requester = winRequester(parsed, winListener.exe)
   const request: Request = {
     id: parsed.id,
     prompt: parsed.prompt,
@@ -466,7 +469,7 @@ async function finish($: EngineInterface, request: Request): Promise<void> {
 }
 
 /**
- * Answers Windows request `id` through `cc-askpass.exe reply`, which hands it to the listener's
+ * Answers Windows request `id` through `cc-askpass.exe --reply`, which hands it to the listener's
  * reply pipe. Exit 0 means written, not accepted: a wrong token or an ended request is dropped there.
  */
 async function winReply($: EngineInterface, id: number, password: string): Promise<void> {
@@ -476,7 +479,7 @@ async function winReply($: EngineInterface, id: number, password: string): Promi
     password = ''
   }
   try {
-    const result = await $.process.run([askpassPath, 'reply'], {
+    const result = await $.process.run([askpassPath, '--reply'], {
       stdin: `${winListener.token}\t${id}\n${password}\n`,
       env: { CC_ASKPASS_PIPE: winListener.pipe },
       timeoutMs: REPLY_TIMEOUT_MS,
@@ -569,7 +572,8 @@ async function buildHelper($: EngineInterface, root: string): Promise<{ outDir: 
       [powershell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${root}\\win\\build.ps1`, source, outDir],
       { timeoutMs: BUILD_TIMEOUT_MS },
     )
-    if (build.exitCode === 0) return { outDir }
+    // A build of the same source by another session starting at once may have finished it.
+    if (build.exitCode === 0 || (await $.fs.exists(`${outDir}\\cc-askpass.exe`))) return { outDir }
     // build.ps1 prints one line; PowerShell's own errors put the reason first.
     const reason = build.stderr.trim().split(/\r?\n/)[0]?.replace(/^cc-askpass: build failed: /, '')
     return { error: reason || `exit code ${build.exitCode}` }
@@ -578,20 +582,50 @@ async function buildHelper($: EngineInterface, root: string): Promise<{ outDir: 
   }
 }
 
-/** Builds the Windows helper and gives bash our ssh; false, toasted, when the build failed. */
+/**
+ * Why the built helper cannot run (AppLocker, WDAC or an antivirus blocks it), or null when it
+ * runs: bare and without a listener, a working helper says CC_ASKPASS_PIPE is not set.
+ */
+async function helperRunError($: EngineInterface, exe: string): Promise<string | null> {
+  try {
+    const run = await $.process.run([exe], { env: { CC_ASKPASS_PIPE: '' }, timeoutMs: REPLY_TIMEOUT_MS })
+    if (run.exitCode === 1 && run.stderr.includes('CC_ASKPASS_PIPE is not set')) return null
+    return run.stderr.trim().split(/\r?\n/)[0] || `exit code ${run.exitCode}`
+  } catch (error) {
+    return String(error)
+  }
+}
+
+/**
+ * Builds the Windows helper, checks that it runs and gives bash our ssh; false, toasted, when
+ * either failed: a shim that cannot run would break every ssh.
+ */
 async function startWindows($: EngineInterface): Promise<boolean> {
   const built = await buildHelper($, $.plugin.root)
   if ('error' in built) {
     $.ui.toast(`cc-askpass: could not build the Windows helper: ${built.error}`)
     return false
   }
+  const error = await helperRunError($, `${built.outDir}\\cc-askpass.exe`)
+  if (error !== null) {
+    $.ui.toast(`cc-askpass: could not run the Windows helper: ${error}`)
+    return false
+  }
   winOutDir = built.outDir
   // Git Bash's profile puts its /usr/bin (and its ssh) before the inherited PATH, so every bash
   // imports this as an `ssh` function instead; the two variables stop it rewriting `/x` arguments
-  // into Windows paths. Never unset, as the PATH entry is not: the wrapper steps aside on its own.
-  const ssh = `${winOutDir}\\shim\\ssh.exe`.replaceAll('\\', '/')
-  await $.env.set('BASH_FUNC_ssh%%', `() {  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "${ssh}" "$@"\n}`)
+  // into Windows paths.
+  await $.env.set('BASH_FUNC_ssh%%', bashSshFunction(`${winOutDir}\\shim\\ssh.exe`))
   return true
+}
+
+/**
+ * Takes our ssh back off PATH and out of bash once the listener never started or ended. The Bash
+ * tool's snapshot keeps the function, where the wrapper passes through: CC_ASKPASS_WRAP is unset.
+ */
+async function removeWinShim($: EngineInterface): Promise<void> {
+  await $.env.set('BASH_FUNC_ssh%%', undefined)
+  await $.env.set('PATH', withoutShim(await $.env.get('PATH'), `${winOutDir}\\shim`, ';'))
 }
 
 /**
@@ -656,10 +690,14 @@ async function runServe($: EngineInterface): Promise<void> {
   if (generation !== serveGeneration) return
   if (!isReady) {
     if (!didGiveUp) notStarted()
+    if (isWin) await removeWinShim($)
     return
   }
   await unsetEnv($)
-  if (isWin) await dropWinRequests($)
+  if (isWin) {
+    await dropWinRequests($)
+    await removeWinShim($)
+  }
   $.ui.toast(`cc-askpass: the askpass listener stopped; ${isWin ? 'ssh' : 'sudo'} will not ask for passwords here`)
 }
 

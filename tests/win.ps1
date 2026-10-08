@@ -79,12 +79,14 @@ function Invoke-Build([string]$outDir) {
   Join-Path $outDir 'cc-askpass.exe'
 }
 
-function Start-Serve([string]$session) {
-  $serve = Start-Program $script:exe @('serve', $session)
+function Start-Serve([string]$session, [string]$exe = $script:exe) {
+  $serve = Start-Program $exe @('serve', $session)
   $ready = Read-Line $serve
   Check ($null -ne $ready) "serve printed no ready line: $(Get-Stderr $serve)"
   $fields = $ready -split "`t"
-  Check ($fields.Count -eq 3 -and $fields[0] -ceq 'ready' -and $fields[1] -ceq "cc-askpass-$session-$PID" -and $fields[2] -cmatch '^[0-9a-f]{32}$') "bad ready line: $ready"
+  Check ($fields.Count -eq 4 -and $fields[0] -ceq 'ready' -and $fields[1] -ceq "cc-askpass-$session-$PID" -and $fields[2] -cmatch '^[0-9a-f]{32}$') "bad ready line: $ready"
+  # The listener's own image as the kernel names it: the built exe, whatever path started it.
+  Check ($fields[3] -eq $script:exe) "the ready line names $($fields[3])"
   $serve.Pipe = $fields[1]
   $serve.Token = $fields[2]
   $serve
@@ -104,7 +106,7 @@ function Read-Request($serve, [int]$ms = 5000) {
 
 # Sends <token>\t<id>\n<password>\n through `reply`, as the mod does.
 function Send-Reply($serve, $id, [string]$password, [string]$token = $serve.Token) {
-  $reply = Start-Program $script:exe @('reply') @{ CC_ASKPASS_PIPE = $serve.Pipe }
+  $reply = Start-Program $script:exe @('--reply') @{ CC_ASKPASS_PIPE = $serve.Pipe }
   $bytes = $utf8.GetBytes("$token`t$id`n$password`n")
   $reply.P.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
   $reply.P.StandardInput.Close()
@@ -119,7 +121,7 @@ function Test([string]$name, [scriptblock]$body) {
 
 # A fake real ssh for the wrapper: it appends its arguments as one JSON line to FAKE_SSH_LOG and
 # plays the relay connection R (serve-stdin), the command connection C (remote.sh run) or a plain
-# ssh as FAKE_SSH_MODE says: record, silent, relay, sleep or deaf.
+# ssh as FAKE_SSH_MODE says: record, silent, relay, sleep (a plain ssh too) or deaf.
 $fakeSource = @'
 using System;
 using System.IO;
@@ -185,6 +187,8 @@ public static class FakeSsh
             }
             return 4;
         }
+        // A plain ssh that keeps running, like a tunnel.
+        if (mode == "sleep") Thread.Sleep(Timeout.Infinite);
         Console.Out.Write("fake-out\n");
         return 7;
     }
@@ -248,6 +252,37 @@ try {
     Check (-not (Test-Path -LiteralPath $old)) 'the old build stayed after its listener ended'
   }
 
+  Test 'parallel builds into one directory all succeed' {
+    # Sessions starting at once build the same source into the same directory.
+    $dir = Join-Path $tmp 'parallel\same'
+    $buildArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $buildScript, $source, $dir)
+    $builds = @(1..3 | ForEach-Object { Start-Program $powershell $buildArgs })
+    foreach ($build in $builds) {
+      $result = Wait-Program $build 120000
+      Check ($result.Code -eq 0) "a parallel build exited $($result.Code): $($result.Err)"
+    }
+    $run = Wait-Program (Start-Program (Join-Path $dir 'cc-askpass.exe') @('Password: '))
+    Check ($run.Code -eq 1 -and $run.Err -match 'CC_ASKPASS_PIPE is not set') "cc-askpass.exe exited $($run.Code): $($run.Err)"
+    # The wrapper, with no real ssh to find.
+    $run = Wait-Program (Start-Program (Join-Path $dir 'shim\ssh.exe') @('h') @{ PATH = $env:SystemRoot })
+    Check ($run.Code -eq 255 -and $run.Err -match 'ssh: command not found') "shim\ssh.exe exited $($run.Code): $($run.Err)"
+    Check (@(Get-ChildItem -LiteralPath $dir -Recurse -Filter '*.tmp.exe').Count -eq 0) 'a temporary exe was left'
+  }
+
+  Test 'a build failure reaches stderr as UTF-8' {
+    $missing = Join-Path $tmp ('' + [char]0x6E2C + [char]0x8A66 + '.cs')
+    $buildArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $buildScript, $missing, (Join-Path $tmp 'nobuild'))
+    $result = Wait-Program (Start-Program $powershell $buildArgs) 60000
+    Check ($result.Code -eq 1) "the build exited $($result.Code)"
+    Check ($result.Err.StartsWith('cc-askpass: build failed: ') -and $result.Err.Contains($missing)) "stderr is '$($result.Err)'"
+  }
+
+  Test 'the helper writes its errors as UTF-8' {
+    $bad = '' + [char]0x6E2C + '\' + [char]0x8A66
+    $result = Wait-Program (Start-Program $exe @('serve', $bad))
+    Check ($result.Code -eq 1 -and $result.Err.Contains("invalid session id '$bad'")) "serve exited $($result.Code): '$($result.Err)'"
+  }
+
   $serve = Start-Serve $session
 
   Test 'askpass reaches the pane line and returns the reply' {
@@ -261,6 +296,37 @@ try {
     Send-Reply $serve $request.id 'hunter2'
     $result = Wait-Program $ask
     Check ($result.Code -eq 0 -and $result.Out -ceq "hunter2`n") "askpass exited $($result.Code) with '$($result.Out)'"
+  }
+
+  Test 'a prompt reading reply is an askpass request' {
+    # A server chooses the prompt text; only --reply runs the replier.
+    $ask = Start-Ask 'reply' $serve
+    $request = Read-Request $serve
+    Check ($request.prompt -ceq 'reply') "prompt is '$($request.prompt)'"
+    Send-Reply $serve $request.id 'r'
+    $result = Wait-Program $ask
+    Check ($result.Code -eq 0 -and $result.Out -ceq "r`n") "askpass exited $($result.Code) with '$($result.Out)'"
+  }
+
+  Test 'the listener names itself by its resolved path' {
+    # A junction in the plugin path: the kernel names the listener and its clients by the target.
+    $junction = Join-Path $tmp 'junction'
+    $null = New-Item -ItemType Junction -Path $junction -Target (Split-Path -Parent $exe)
+    try {
+      $viaJunction = Join-Path $junction 'cc-askpass.exe'
+      # Start-Serve checks that the ready line names $exe.
+      $other = Start-Serve ('test-' + [guid]::NewGuid().ToString('N')) $viaJunction
+      $ask = Start-Ask 'Password: ' $other $viaJunction
+      $request = Read-Request $other
+      Check ($request.client.exe -eq $exe) "client.exe is $($request.client.exe)"
+      Send-Reply $other $request.id 'j'
+      Check ((Wait-Program $ask).Out -ceq "j`n") 'askpass through the junction got the wrong reply'
+      $other.P.Kill()
+      $null = $other.P.WaitForExit(5000)
+    } finally {
+      # The link only: a recursive delete would follow it.
+      [IO.Directory]::Delete($junction)
+    }
   }
 
   Test 'password round-trips exactly' {
@@ -535,6 +601,33 @@ try {
       Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $deadline)
     Check ($left.Count -eq 0) "$($left.Count) fake ssh processes are left"
+  }
+
+  Test 'killing a pass-through wrapper ends its ssh unless ssh forks' {
+    $cases = @(
+      @($false, @('-N', '-L', '1:h:2', 'h')),
+      @($false, @('h', 'sleep', '60')),
+      @($true, @('-f', 'h', 'sleep', '60')),
+      @($true, @('-o', 'ForkAfterAuthentication=yes', 'h', 'sleep', '60'))
+    )
+    foreach ($case in $cases) {
+      $forks, $argv = $case
+      $run = Start-Wrapper $argv @{ FAKE_SSH_MODE = 'sleep'; CC_ASKPASS_WRAP = $null }
+      for ($i = 0; $i -lt 100 -and (Get-Runs $run).Count -lt 1; $i++) { Start-Sleep -Milliseconds 100 }
+      Check ((Get-Runs $run).Count -eq 1) "ssh did not start for $argv"
+      $run.P.Kill()
+      $deadline = (Get-Date).AddSeconds(2)
+      do {
+        Start-Sleep -Milliseconds 100
+        $left = @(Get-Process ssh -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $fake })
+      } while ($left.Count -gt 0 -and (Get-Date) -lt $deadline)
+      if ($forks) {
+        Check ($left.Count -eq 1) "a forking ssh did not outlive the wrapper for $argv"
+        foreach ($process in $left) { $process.Kill(); $null = $process.WaitForExit(5000) }
+      } else {
+        Check ($left.Count -eq 0) "$($left.Count) fake ssh processes are left for $argv"
+      }
+    }
   }
 
   Test 'an R that stops reading cannot hold the wrapper' {

@@ -1,6 +1,6 @@
 // cc-askpass Windows helper: one program, its mode chosen by its name and arguments.
 //   cc-askpass.exe serve <session id>   listener, started by the mod
-//   cc-askpass.exe reply                copies stdin (<token>\t<id>\n<password>\n) to the listener
+//   cc-askpass.exe --reply              copies stdin (<token>\t<id>\n<password>\n) to the listener
 //   cc-askpass.exe <prompt>             askpass, started by ssh and git through SSH_ASKPASS
 //   ssh.exe <ssh arguments>             the ssh wrapper (shim\ssh.exe)
 // Built by win/build.ps1 with Windows PowerShell's Add-Type: C# 5 on .NET Framework 4.x.
@@ -25,11 +25,17 @@ public static class Program
 {
     public static int Main(string[] args)
     {
+        // UTF-8, as stdout: the console's code page cannot carry every path or message, and setting
+        // Console.OutputEncoding would change a shared console's code page.
+        StreamWriter stderr = new StreamWriter(Console.OpenStandardError(), Pipes.Utf8);
+        stderr.AutoFlush = true;
+        Console.SetError(stderr);
         string self = System.Reflection.Assembly.GetEntryAssembly().Location;
         if (string.Equals(Path.GetFileNameWithoutExtension(self), "ssh", StringComparison.OrdinalIgnoreCase))
             return SshWrapper.Run(self, args);
         if (args.Length == 2 && args[0] == "serve") return Listener.Run(args[1]);
-        if (args.Length == 1 && args[0] == "reply") return Replier.Run();
+        // A server chooses the prompt ssh passes to askpass, so the mode is an option, not a plain word.
+        if (args.Length == 1 && args[0] == "--reply") return Replier.Run();
         return Asker.Run(args.Length > 0 ? args[0] : "");
     }
 }
@@ -378,6 +384,8 @@ sealed class SshArgs
     public readonly int CommandStart;
     // An unknown option or one of -N -W -O -s -G -V -Q -f.
     public bool PassFlag;
+    // -f or ForkAfterAuthentication: ssh goes on in the background after the wrapper exits.
+    public bool Forks;
     // A blank in a word up to the host (bin/shim/ssh: the mod reads the host back from ps).
     public readonly bool Spaced;
 
@@ -438,6 +446,7 @@ sealed class SshArgs
     void Add(char opt, string value)
     {
         if ("NWOsGVQf".IndexOf(opt) >= 0) PassFlag = true;
+        if (opt == 'f') Forks = true;
         if ("SMtTn".IndexOf(opt) >= 0) return;
         if (opt == 'o')
         {
@@ -450,6 +459,7 @@ sealed class SshArgs
             // its job, and a session without stdin or a command has no prompt to relay.
             if ((key == "forkafterauthentication" || key == "stdinnull") && yes ||
                 key == "sessiontype" && (setting == "none" || setting == "subsystem")) PassFlag = true;
+            if (key == "forkafterauthentication" && yes) Forks = true;
             if (key == "controlpath" || key == "controlmaster") return;
         }
         RelayOptions.Add("-" + opt);
@@ -491,6 +501,9 @@ static class SshWrapper
             int? status = Wrap(realSsh, args, parsed, shimDir);
             if (status != null) return status.Value;
         }
+        // As exec does on Linux: killing the wrapper ends ssh too (a -L tunnel frees its port),
+        // unless ssh forks to outlive it.
+        if (!parsed.Forks) EnterJob();
         try
         {
             using (Process ssh = Start(realSsh, words, false))
@@ -788,10 +801,7 @@ static class SshWrapper
         commandArgs.AddRange(RunWords(new string('x', DirMax), commandB64));
         if (QuoteArg(realSsh).Length + 1 + string.Join(" ", commandArgs.ConvertAll(QuoteArg)).Length >= CommandLineMax) return null;
 
-        int jobError;
-        if (!Native.EnterKillOnCloseJob(out jobError))
-            Console.Error.WriteLine("cc-askpass: could not set up a job object (Windows error " + jobError +
-                "); ssh processes may outlive an interrupted command");
+        EnterJob();
         // R forwards nothing (C's own forwards would not bind) and never has a terminal (one would
         // echo the answer back as a request line). The first -o wins; -x -a -T win after the caller's.
         List<string> relayArgs = new List<string> { "-o", "ClearAllForwardings=yes" };
@@ -852,6 +862,19 @@ static class SshWrapper
         toRelay.CompleteAdding();
         relay.WaitForExit(5000);
         return status;
+    }
+
+    static bool inJob;
+
+    // Every ssh started from here on ends with this process (once is enough: the job is kept).
+    static void EnterJob()
+    {
+        if (inJob) return;
+        inJob = true;
+        int jobError;
+        if (!Native.EnterKillOnCloseJob(out jobError))
+            Console.Error.WriteLine("cc-askpass: could not set up a job object (Windows error " + jobError +
+                "); ssh processes may outlive an interrupted command");
     }
 
     static void Background(ThreadStart body)
@@ -1011,6 +1034,13 @@ static class Listener
             Console.Error.WriteLine("cc-askpass: cannot find the listener's parent process");
             return 1;
         }
+        // The kernel's name for this exe (a junction or subst drive resolved), as it names the clients.
+        string image = Native.ImagePath(self);
+        if (image == null)
+        {
+            Console.Error.WriteLine("cc-askpass: cannot read the listener's own executable path");
+            return 1;
+        }
         string name = "cc-askpass-" + session + "-" + claudePid;
         NamedPipeServerStream requests = CreateFirst(name);
         NamedPipeServerStream replies = requests == null ? null : CreateFirst(name + "-reply");
@@ -1021,7 +1051,7 @@ static class Listener
         token = BitConverter.ToString(random).Replace("-", "").ToLowerInvariant();
         // Raw bytes, not Console.Out: setting Console.OutputEncoding would change a shared console's code page.
         stdout = Console.OpenStandardOutput();
-        Print("ready\t" + name + "\t" + token);
+        Print("ready\t" + name + "\t" + token + "\t" + image);
 
         StartThread(delegate { Accept(replies, name + "-reply", HandleReply); });
         // Nobody is left to answer once Claude Code is gone.

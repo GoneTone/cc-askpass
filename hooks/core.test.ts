@@ -5,6 +5,7 @@ import {
   applyMaskedInput,
   askedByLine,
   bashShellArgs,
+  bashSshFunction,
   claudePidOf,
   clipLines,
   matchBashCommand,
@@ -16,6 +17,7 @@ import {
   parseRequest,
   relayHost,
   withShim,
+  withoutShim,
   remoteLabel,
   stripControl,
   promptLabel,
@@ -100,6 +102,8 @@ test('stripControl drops C0 and C1 controls, escape included', () => {
 
 test('stripControl drops invisible format and bidi characters', () => {
   expect(stripControl('a\u200bb\u200fc\u202ad\u202ee\u2066f\u2069g\u2028h\u2029i')).toBe('abcdefghi')
+  // The Arabic letter mark, the BOM, the word joiner to the invisible plus, the Mongolian vowel separator.
+  expect(stripControl('a\u061cb\ufeffc\u2060d\u2061e\u2064f\u180eg')).toBe('abcdefg')
 })
 
 test('withShim puts the directory first, once', () => {
@@ -264,10 +268,33 @@ test('withShim splits a Windows PATH on ;', () => {
   expect(withShim('C:\\a;C:\\s;C:\\b', 'C:\\s', ';')).toBe(null)
 })
 
-test('parseWinReady reads the pipe name and a 32-digit token', () => {
+test('withoutShim takes the directory off PATH', () => {
+  expect(withoutShim('C:\\s;C:\\a;C:\\b', 'C:\\s', ';')).toBe('C:\\a;C:\\b')
+  expect(withoutShim('C:\\a;C:\\b', 'C:\\s', ';')).toBe('C:\\a;C:\\b')
+  expect(withoutShim('C:\\s', 'C:\\s', ';')).toBe('')
+  expect(withoutShim(undefined, 'C:\\s', ';')).toBe(undefined)
+})
+
+test('bashSshFunction single-quotes the wrapper path', () => {
+  expect(bashSshFunction('C:\\p\\shim\\ssh.exe')).toBe(
+    `() {  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' 'C:/p/shim/ssh.exe' "$@"\n}`,
+  )
+  // `$`, a backtick and a quote are legal in Windows user names and CLAUDE_CONFIG_DIR.
+  expect(bashSshFunction("C:\\Users\\a$b`c'd\\shim\\ssh.exe")).toBe(
+    "() {  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' 'C:/Users/a$b`c'\\''d/shim/ssh.exe' \"$@\"\n}",
+  )
+})
+
+test('parseWinReady reads the pipe name, a 32-digit token and the helper path', () => {
   const token = 'a'.repeat(32)
-  expect(parseWinReady(`ready\tcc-askpass-S-900\t${token}`)).toEqual({ pipe: 'cc-askpass-S-900', token })
-  expect(parseWinReady(`ready\tcc-askpass-S-900\t${'a'.repeat(31)}`)).toBe(null)
+  const exe = 'C:\\p\\win\\out\\0123456789abcdef\\cc-askpass.exe'
+  const ready = { pipe: 'cc-askpass-S-900', token, exe }
+  expect(parseWinReady(`ready\tcc-askpass-S-900\t${token}\t${exe}`)).toEqual(ready)
+  expect(parseWinReady(`ready\tcc-askpass-S-900\t${token}\t${exe}\r`)).toEqual(ready)
+  // An older listener's three fields, or no path.
+  expect(parseWinReady(`ready\tcc-askpass-S-900\t${token}`)).toBe(null)
+  expect(parseWinReady(`ready\tcc-askpass-S-900\t${token}\t`)).toBe(null)
+  expect(parseWinReady(`ready\tcc-askpass-S-900\t${'a'.repeat(31)}\t${exe}`)).toBe(null)
   expect(parseWinReady('ready\t/run/user/1000/cc-askpass/S-900')).toBe(null)
 })
 
@@ -319,33 +346,39 @@ test('parseWinLine rejects fields of the wrong type', () => {
 })
 
 test('winAskSource names the program behind our helper, our relay, or the client', () => {
-  expect(winAskSource(winRequest(), HELPER, SHIM)).toEqual({ kind: 'program', exe: WIN_SSH })
+  expect(winAskSource(winRequest(), HELPER)).toEqual({ kind: 'program', exe: WIN_SSH })
   // Windows paths ignore case.
   const upper = winRequest({ client: { pid: 1, exe: HELPER.toUpperCase() } })
-  expect(winAskSource(upper, HELPER, SHIM)).toEqual({ kind: 'program', exe: WIN_SSH })
-  expect(winAskSource(winRequest({ parent: null }), HELPER, SHIM)).toEqual({ kind: 'unverified', exe: null })
+  expect(winAskSource(upper, HELPER)).toEqual({ kind: 'program', exe: WIN_SSH })
+  expect(winAskSource(winRequest({ parent: null }), HELPER)).toEqual({ kind: 'unverified', exe: null })
   const relay = { host: 'server', realSsh: WIN_SSH, remotePid: 4242, via: null, reported: null }
-  expect(winAskSource(winRequest({ client: { pid: 1, exe: SHIM }, relay }), HELPER, SHIM)).toEqual({
+  expect(winAskSource(winRequest({ client: { pid: 1, exe: SHIM }, relay }), HELPER)).toEqual({
     kind: 'relay',
     host: 'server',
     realSsh: WIN_SSH,
   })
   const evil = winRequest({ client: { pid: 1, exe: 'C:\\x\\evil.exe' }, relay })
-  expect(winAskSource(evil, HELPER, SHIM)).toEqual({ kind: 'unverified', exe: 'C:\\x\\evil.exe' })
+  expect(winAskSource(evil, HELPER)).toEqual({ kind: 'unverified', exe: 'C:\\x\\evil.exe' })
+  // A client whose image path could not be read, or held only invisible characters.
+  expect(winAskSource(winRequest({ client: { pid: 1, exe: '' } }), HELPER)).toEqual({ kind: 'unverified', exe: null })
+  expect(winAskSource(winRequest({ client: { pid: 1, exe: '\u202e' } }), HELPER)).toEqual({ kind: 'unverified', exe: null })
   // Either slash.
   const forward = winRequest({ client: { pid: 1, exe: HELPER.replaceAll('\\', '/') } })
-  expect(winAskSource(forward, HELPER, SHIM)).toEqual({ kind: 'program', exe: WIN_SSH })
+  expect(winAskSource(forward, HELPER)).toEqual({ kind: 'program', exe: WIN_SSH })
+  // The shim is the one beside the helper the listener runs from, whatever path the mod built it under.
+  const otherShim = winRequest({ client: { pid: 1, exe: 'C:\\q\\shim\\ssh.exe' }, relay })
+  expect(winAskSource(otherShim, HELPER).kind).toBe('unverified')
 })
 
 test('winAskSource strips bidi and control characters from paths', () => {
   // U+202E turns `evil\u202Egpj.exe` into what reads as "evilexe.jpg".
   const disguised = winRequest({ client: { pid: 1, exe: 'C:\\x\\evil\u202egpj.exe' } })
-  expect(winAskSource(disguised, HELPER, SHIM)).toEqual({ kind: 'unverified', exe: 'C:\\x\\evilgpj.exe' })
-  expect(winRequester(disguised, HELPER, SHIM).comm).toBe('evilgpj')
+  expect(winAskSource(disguised, HELPER)).toEqual({ kind: 'unverified', exe: 'C:\\x\\evilgpj.exe' })
+  expect(winRequester(disguised, HELPER).comm).toBe('evilgpj')
   const parent = { pid: 2, exe: 'C:\\x\\s\u202esh.exe', args: '' }
-  expect(winAskSource(winRequest({ parent }), HELPER, SHIM)).toEqual({ kind: 'program', exe: 'C:\\x\\ssh.exe' })
+  expect(winAskSource(winRequest({ parent }), HELPER)).toEqual({ kind: 'program', exe: 'C:\\x\\ssh.exe' })
   const relay = { host: 'server', realSsh: 'C:\\x\\\u202essh.exe\u001b[2J', remotePid: 4242, via: null, reported: null }
-  expect(winAskSource(winRequest({ client: { pid: 1, exe: SHIM }, relay }), HELPER, SHIM)).toEqual({
+  expect(winAskSource(winRequest({ client: { pid: 1, exe: SHIM }, relay }), HELPER)).toEqual({
     kind: 'relay',
     host: 'server',
     realSsh: 'C:\\x\\ssh.exe[2J',
@@ -353,14 +386,14 @@ test('winAskSource strips bidi and control characters from paths', () => {
 })
 
 test('winRequester names the process that Asked by names', () => {
-  expect(winRequester(winRequest(), HELPER, SHIM)).toEqual({
+  expect(winRequester(winRequest(), HELPER)).toEqual({
     pid: 2,
     isSudo: false,
     comm: 'ssh',
     command: 'ssh -T git@github.com',
     askedBy: { kind: 'program', exe: WIN_SSH },
   })
-  const evil = winRequester(winRequest({ client: { pid: 1, exe: 'C:\\x\\evil.exe' } }), HELPER, SHIM)
+  const evil = winRequester(winRequest({ client: { pid: 1, exe: 'C:\\x\\evil.exe' } }), HELPER)
   expect([evil.pid, evil.comm]).toEqual([1, 'evil'])
 })
 

@@ -803,8 +803,11 @@ type WinLine = {
   relay?: { host: string; realSsh: string; remotePid: number; via: string | null; reported: string | null } | null
 }
 
-/** A native Windows session with a ready listener that emits JSON request lines. */
-async function winWorld($: any, on: any) {
+/**
+ * A native Windows session with a ready listener that emits JSON request lines; the listener
+ * reports running from `helper` (by default where the mod built it).
+ */
+async function winWorld($: any, on: any, { helper }: { helper?: string } = {}) {
   const clock = mock.clock(on)
   windowsWorld(on)
   const serve = fakeServe(on)
@@ -817,9 +820,10 @@ async function winWorld($: any, on: any) {
     return new Promise(resolve => running.set(e.command, () => resolve(result)))
   })
   await $.session.start(START)
-  serve.emit(`ready\t${WIN_PIPE}\t${WIN_TOKEN}\n`)
   await clock.settle()
-  const exe = serve.argvs[0]?.[0] ?? ''
+  const exe = helper ?? serve.argvs[0]?.[0] ?? ''
+  serve.emit(`ready\t${WIN_PIPE}\t${WIN_TOKEN}\t${exe}\n`)
+  await clock.settle()
 
   return {
     clock,
@@ -852,7 +856,7 @@ async function winWorld($: any, on: any) {
     /** session.start again: a new listener, ready with `token`. */
     async restart(token: string) {
       await $.session.start(START)
-      serve.emit(`ready\t${WIN_PIPE}\t${token}\n`)
+      serve.emit(`ready\t${WIN_PIPE}\t${token}\t${exe}\n`)
       await clock.settle()
     },
     /** Claude starts a PowerShell call that runs until `end` is called. */
@@ -863,7 +867,7 @@ async function winWorld($: any, on: any) {
       return { end: () => running.get(command)?.() }
     },
     replies() {
-      return rec.runs.filter(run => run.argv[1] === 'reply')
+      return rec.runs.filter(run => run.argv[1] === '--reply')
     },
     mount() {
       return $.ui.mount({ plugin: 'cc-askpass', surface: 'terminal', component: 'Pane', props: PANE_PROPS, requestId: 'askpass' })
@@ -890,7 +894,7 @@ test('a Windows reply goes through the helper', async ($, on) => {
   await ui.input({ key: await passwordKey(ui), text: '•'.repeat(PASSWORD.length) })
   await w.clock.settle()
   expect(w.replies()).toEqual([
-    { argv: [w.exe, 'reply'], stdin: `${WIN_TOKEN}\t7\n${PASSWORD}\n`, env: { CC_ASKPASS_PIPE: WIN_PIPE } },
+    { argv: [w.exe, '--reply'], stdin: `${WIN_TOKEN}\t7\n${PASSWORD}\n`, env: { CC_ASKPASS_PIPE: WIN_PIPE } },
   ])
   expect(w.rec.runs.some(run => run.argv[0] === 'sh' || run.argv[0] === 'ps')).toBe(false)
   expect(w.rec.closes).toContain('askpass')
@@ -906,6 +910,31 @@ test('a Windows password with a line break is answered empty', async ($, on) => 
   expect(w.replies().map(reply => reply.stdin)).toEqual([`${WIN_TOKEN}\t7\n\n`])
   expect(w.rec.logs.some(text => text.includes('line break'))).toBe(true)
   expect(w.rec.logs.some(text => text.includes('secret'))).toBe(false)
+})
+
+// A junction or subst drive in the plugin path: the kernel names the helper by the resolved path.
+const RESOLVED_HELPER = 'D:\\real\\win\\out\\0123456789abcdef\\cc-askpass.exe'
+
+test('a Windows helper is known by the path its listener reports', async ($, on) => {
+  const w = await winWorld($, on, { helper: RESOLVED_HELPER })
+  await w.request(1)
+  const ui = await w.mount()
+  expect((await ui.find({ text: /^Asked by:/ }))?.text).toBe(`Asked by: ${WIN_SSH}`)
+  const relay = { host: 'server', realSsh: WIN_SSH, remotePid: 4242, via: null, reported: null }
+  await ui.press({ key: 'cancel' })
+  await w.clock.settle()
+  await ui.unmount()
+  await w.request(2, { client: { pid: 5300, exe: w.shim }, relay })
+  const relayed = await w.mount()
+  expect((await relayed.find({ text: /^Asked by:/ }))?.text).toBe(`Asked by: cc-askpass ssh wrapper → server (${WIN_SSH})`)
+})
+
+test('a client at the built path is not the helper the listener runs from', async ($, on) => {
+  const w = await winWorld($, on, { helper: RESOLVED_HELPER })
+  const built = w.rec.runs.find(run => run.argv.length === 1)?.argv[0] ?? ''
+  await w.request(1, { client: { pid: 5200, exe: built } })
+  const ui = await w.mount()
+  expect((await ui.find({ text: /^Asked by:/ }))?.text).toBe(`Asked by: ${built} (unverified)`)
 })
 
 test('a direct pipe client shows as unverified', async ($, on) => {
