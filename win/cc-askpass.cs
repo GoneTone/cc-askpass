@@ -15,7 +15,9 @@ using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
 
 public static class Program
@@ -24,10 +26,7 @@ public static class Program
     {
         string self = System.Reflection.Assembly.GetEntryAssembly().Location;
         if (string.Equals(Path.GetFileNameWithoutExtension(self), "ssh", StringComparison.OrdinalIgnoreCase))
-        {
-            Console.Error.WriteLine("cc-askpass: the ssh wrapper is not built yet");
-            return 255;
-        }
+            return SshWrapper.Run(self, args);
         if (args.Length == 2 && args[0] == "serve") return Listener.Run(args[1]);
         if (args.Length == 1 && args[0] == "reply") return Replier.Run();
         return Asker.Run(args.Length > 0 ? args[0] : "");
@@ -95,6 +94,60 @@ static class Native
 
     [DllImport("ntdll.dll")]
     static extern int NtQueryInformationProcess(IntPtr process, int infoClass, IntPtr info, int length, out int returned);
+
+    const int JobObjectExtendedLimitInformation = 9;
+    const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        // JOBOBJECT_BASIC_LIMIT_INFORMATION
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+        // IO_COUNTERS
+        public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount;
+        public ulong ReadTransferCount, WriteTransferCount, OtherTransferCount;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr CreateJobObjectW(IntPtr attributes, IntPtr name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION info,
+        int length);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    // A job whose processes end when its last handle closes: never closed here, so with this process.
+    // The handle is not inheritable, so no child keeps the job alive.
+    public static IntPtr KillOnCloseJob()
+    {
+        IntPtr job = CreateJobObjectW(IntPtr.Zero, IntPtr.Zero);
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+        info.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (job != IntPtr.Zero)
+            SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref info, Marshal.SizeOf(info));
+        return job;
+    }
+
+    // ponytail: a child that starts a process before it joins escapes the job; CREATE_SUSPENDED
+    // through CreateProcessW would close that gap if ssh ever proves that fast.
+    public static void Join(IntPtr job, Process process)
+    {
+        if (job != IntPtr.Zero) AssignProcessToJobObject(job, process.Handle);
+    }
 
     // A pipe instance only the current user can open; `first` fails while any instance of the name exists.
     public static NamedPipeServerStream CreatePipe(string name, bool first)
@@ -234,15 +287,15 @@ static class Pipes
         return 1;
     }
 
-    // Null when the pipe cannot be reached in 5 s (Connect keeps retrying while it does not exist).
-    public static NamedPipeClientStream Connect(string name)
+    // Null when the pipe cannot be reached in ms (Connect keeps retrying while it does not exist).
+    public static NamedPipeClientStream Connect(string name, int ms = ReachMs)
     {
         // Identification only: a server squatting on the name cannot act as this user.
         NamedPipeClientStream pipe = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.None,
             TokenImpersonationLevel.Identification);
         try
         {
-            pipe.Connect(ReachMs);
+            pipe.Connect(ms);
             return pipe;
         }
         catch (Exception)
@@ -306,6 +359,504 @@ static class Pipes
         while (n > 0 && (bytes[n] & 0xC0) == 0x80) n--;
         Array.Resize(ref bytes, n);
         return bytes;
+    }
+}
+
+// ssh's arguments split as bin/shim/ssh's parse_args does (getopts with ssh's option string).
+// Like ssh, options after the host are options too, unless `--` came first.
+sealed class SshArgs
+{
+    // The letters of ssh's options, each followed by ':' when it takes a value.
+    const string OptString = "1246ab:c:e:fgi:kl:m:no:p:qstvxAB:CD:E:F:GI:J:KL:MNO:P:Q:R:S:TVw:W:XYy";
+
+    // The options for the relay connection: without the caller's multiplexing (a socket the
+    // caller names can be a fake master that receives the answer), -t (a terminal echoes the
+    // answer back as a request line; -T is added) and -n (the relay needs its stdin).
+    public readonly List<string> RelayOptions = new List<string>();
+    public readonly string Host = "";
+    public readonly string Command;
+    public readonly int CommandStart;
+    // An unknown option or one of -N -W -O -s -G -V -Q -f.
+    public bool PassFlag;
+    // A blank in a word up to the host (bin/shim/ssh: the mod reads the host back from ps).
+    public readonly bool Spaced;
+
+    public SshArgs(string[] args)
+    {
+        int i = Options(args, 0);
+        bool ended = i > 0 && args[i - 1] == "--";
+        for (int j = 0; j <= i && j < args.Length; j++)
+            foreach (char c in args[j])
+                if (c == ' ' || (c >= '\t' && c <= '\r')) Spaced = true;
+        if (i < args.Length) Host = args[i++];
+        while (!ended && i < args.Length && args[i].Length > 1 && args[i][0] == '-')
+        {
+            i = Options(args, i);
+            ended = args[i - 1] == "--";
+        }
+        CommandStart = i;
+        Command = string.Join(" ", args, i, args.Length - i);
+    }
+
+    // getopts from args[i] on; returns the index after the words it used.
+    int Options(string[] args, int i)
+    {
+        while (i < args.Length)
+        {
+            string word = args[i];
+            if (word == "--") return i + 1;
+            if (word.Length < 2 || word[0] != '-') return i;
+            i++;
+            for (int k = 1; k < word.Length; k++)
+            {
+                char opt = word[k];
+                int at = opt == ':' ? -1 : OptString.IndexOf(opt);
+                if (at < 0)
+                {
+                    // ssh rejects it with its own message.
+                    PassFlag = true;
+                    continue;
+                }
+                string value = null;
+                if (at + 1 < OptString.Length && OptString[at + 1] == ':')
+                {
+                    if (k + 1 < word.Length) value = word.Substring(k + 1);
+                    else if (i < args.Length) value = args[i++];
+                    else
+                    {
+                        PassFlag = true;
+                        break;
+                    }
+                    k = word.Length;
+                }
+                Add(opt, value);
+            }
+        }
+        return i;
+    }
+
+    void Add(char opt, string value)
+    {
+        if ("NWOsGVQf".IndexOf(opt) >= 0) PassFlag = true;
+        if ("SMtTn".IndexOf(opt) >= 0) return;
+        if (opt == 'o')
+        {
+            // "Key=value" or "Key value", the key in any case.
+            string key = value.Split('=', ' ')[0];
+            if (key.Equals("ControlPath", StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("ControlMaster", StringComparison.OrdinalIgnoreCase)) return;
+        }
+        RelayOptions.Add("-" + opt);
+        if (value != null) RelayOptions.Add(value);
+    }
+}
+
+// shim\ssh.exe (spec §6): runs the real ssh, and when a password prompt on the remote host can
+// reach the pane, runs the command over a second connection R that relays the remote askpass.
+// It never writes to stdout: that belongs to the user's command.
+static class SshWrapper
+{
+    const int CommandLineMax = 32767;
+    // The longest token directory accepted from the remote, so C's length is known beforehand.
+    const int DirMax = 256;
+    const string Eval = "eval \"$(printf %s \"$CCAP_RS_B64\" | base64 -d 2>/dev/null || printf %s \"$CCAP_RS_B64\" | base64 -D)\"";
+
+    public static int Run(string self, string[] args)
+    {
+        string shimDir = Path.GetDirectoryName(self);
+        string realSsh = FindRealSsh(shimDir);
+        if (realSsh == null)
+        {
+            Console.Error.WriteLine("cc-askpass: ssh: command not found");
+            return 255;
+        }
+        SshArgs parsed = new SshArgs(args);
+        if (ShouldWrap(parsed, Path.Combine(Path.GetDirectoryName(shimDir), "cc-askpass.exe")))
+        {
+            int? status = Wrap(realSsh, args, parsed, shimDir);
+            if (status != null) return status.Value;
+        }
+        try
+        {
+            using (Process ssh = Start(realSsh, new List<string>(args), false))
+            {
+                ssh.WaitForExit();
+                return ssh.ExitCode;
+            }
+        }
+        catch (System.ComponentModel.Win32Exception error)
+        {
+            Console.Error.WriteLine("cc-askpass: cannot start " + realSsh + " (Windows error " + error.NativeErrorCode + ")");
+            return 255;
+        }
+    }
+
+    // The first ssh on PATH that is not a cc-askpass wrapper: this one, or another build's copy
+    // (two wrappers would start each other forever), known by the helper beside its directory.
+    public static string FindRealSsh(string shimDir)
+    {
+        string[] exts = (Environment.GetEnvironmentVariable("PATHEXT") ?? ".COM;.EXE").Split(';');
+        foreach (string entry in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
+        {
+            string dir = entry.Trim().Trim('"');
+            if (dir.Length == 0) continue;
+            try
+            {
+                if (string.Equals(Path.GetFullPath(dir).TrimEnd('\\'), shimDir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) ||
+                    File.Exists(Path.Combine(dir, @"..\cc-askpass.exe"))) continue;
+                foreach (string ext in exts)
+                {
+                    // Only programs CreateProcess starts itself: a .cmd or .bat would run through cmd.exe.
+                    if (!ext.Equals(".exe", StringComparison.OrdinalIgnoreCase) &&
+                        !ext.Equals(".com", StringComparison.OrdinalIgnoreCase)) continue;
+                    string candidate = Path.Combine(dir, "ssh" + ext);
+                    if (File.Exists(candidate)) return Path.GetFullPath(candidate);
+                }
+            }
+            catch (Exception)
+            {
+                // Not a usable path.
+            }
+        }
+        return null;
+    }
+
+    // bin/shim/ssh's should_wrap.
+    public static bool ShouldWrap(SshArgs args, string helper)
+    {
+        // The shim stays on PATH for the whole session; this live switch is remoteHosts.
+        if (Environment.GetEnvironmentVariable("CC_ASKPASS_WRAP") != "1") return false;
+        // The relay asks the listener this helper asks; an SSH_ASKPASS naming another is not ours to use.
+        if (!SamePath(Environment.GetEnvironmentVariable("SSH_ASKPASS"), helper)) return false;
+        if (args.Command.Length == 0 || args.PassFlag || args.Spaced) return false;
+        if (IsProtocolCommand(args.Command)) return false;
+        string name = HostName(args.Host);
+        if (IsExcluded(name)) return false;
+        // The name goes into the request lines, where the mod shows it.
+        if (!Regex.IsMatch(name, "^[A-Za-z0-9._@:%-]+$")) return false;
+        string pipe = Pipes.Name();
+        if (string.IsNullOrEmpty(pipe)) return false;
+        using (NamedPipeClientStream listener = Pipes.Connect(pipe, 1000)) return listener != null;
+    }
+
+    static bool SamePath(string a, string b)
+    {
+        if (string.IsNullOrEmpty(a)) return false;
+        try
+        {
+            return string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    // A machine protocol that needs a clean channel.
+    static bool IsProtocolCommand(string command)
+    {
+        string[] words = command.Split(new char[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length == 0) return false;
+        switch (words[0].Substring(words[0].LastIndexOf('/') + 1))
+        {
+            case "git-upload-pack":
+            case "git-receive-pack":
+            case "git-upload-archive":
+            case "sftp-server":
+            case "internal-sftp":
+                return true;
+            case "scp":
+                return Array.IndexOf(words, "-t", 1) > 0 || Array.IndexOf(words, "-f", 1) > 0;
+            case "rsync":
+                return command.IndexOf("sudo", StringComparison.Ordinal) < 0 && Array.IndexOf(words, "--server", 1) > 0;
+            case "borg":
+                return words.Length > 1 && words[1] == "serve";
+        }
+        return false;
+    }
+
+    // The host without ssh://, user@ and :port; a bare IPv6 address (several colons) stays whole.
+    static string HostName(string host)
+    {
+        string name = host.StartsWith("ssh://", StringComparison.Ordinal) ? host.Substring(6) : host;
+        bool isUrl = name.Length != host.Length;
+        name = name.Substring(name.LastIndexOf('@') + 1);
+        int colon = name.IndexOf(':');
+        if (colon >= 0 && (isUrl || name.IndexOf(':', colon + 1) < 0)) name = name.Substring(0, name.LastIndexOf(':'));
+        return name;
+    }
+
+    // The name matches a CC_ASKPASS_EXCLUDE glob (one per line, sh's *, ? and [...]).
+    static bool IsExcluded(string name)
+    {
+        foreach (string glob in (Environment.GetEnvironmentVariable("CC_ASKPASS_EXCLUDE") ?? "").Split('\n'))
+        {
+            string pattern = glob.TrimEnd('\r');
+            if (pattern.Length == 0) continue;
+            StringBuilder regex = new StringBuilder("^");
+            for (int i = 0; i < pattern.Length; i++)
+            {
+                char c = pattern[i];
+                int end = c == '[' && i + 2 <= pattern.Length ? pattern.IndexOf(']', i + 2) : -1;
+                if (c == '*') regex.Append(".*");
+                else if (c == '?') regex.Append('.');
+                else if (end > 0)
+                {
+                    string set = pattern.Substring(i + 1, end - i - 1).Replace(@"\", @"\\").Replace("[", @"\[");
+                    regex.Append('[').Append(set[0] == '!' ? "^" + set.Substring(1) : set).Append(']');
+                    i = end;
+                }
+                else regex.Append(Regex.Escape(c.ToString()));
+            }
+            try
+            {
+                if (Regex.IsMatch(name, regex.Append('$').ToString(), RegexOptions.Singleline)) return true;
+            }
+            catch (ArgumentException)
+            {
+                // A pattern we cannot read: the host may be one the person excluded.
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The standard Windows quoting (CommandLineToArgvW and the C runtime). Git's ssh, an MSYS
+    // program, also reads the line itself: it expands wildcards, ~, {} and @file in unquoted words
+    // and honours ' quotes, so every word is quoted unless it is plain characters (base64, our
+    // own words), but it cuts a quoted word at 8,186 characters, so a plain one stays bare.
+    public static string QuoteArg(string arg)
+    {
+        if (Regex.IsMatch(arg, "^[A-Za-z0-9+/=._,:%-]+$")) return arg;
+        StringBuilder quoted = new StringBuilder("\"");
+        int slashes = 0;
+        foreach (char c in arg)
+        {
+            if (c == '\\')
+            {
+                slashes++;
+                continue;
+            }
+            quoted.Append('\\', c == '"' ? slashes * 2 + 1 : slashes).Append(c);
+            slashes = 0;
+        }
+        return quoted.Append('\\', slashes * 2).Append('"').ToString();
+    }
+
+    static Process Start(string exe, List<string> args, bool redirect)
+    {
+        ProcessStartInfo info = new ProcessStartInfo(exe, string.Join(" ", args.ConvertAll(QuoteArg)));
+        info.UseShellExecute = false;
+        info.RedirectStandardInput = redirect;
+        info.RedirectStandardOutput = redirect;
+        if (redirect) info.StandardOutputEncoding = Pipes.Utf8;
+        return Process.Start(info);
+    }
+
+    static void Kill(Process process)
+    {
+        try
+        {
+            process.Kill();
+        }
+        catch (Exception)
+        {
+            // Already gone.
+        }
+    }
+
+    static string Base64File(string root, string name)
+    {
+        return Convert.ToBase64String(File.ReadAllBytes(Path.Combine(root, name)));
+    }
+
+    // C's remote command, remote.sh run in the token directory R made, as words ssh joins with
+    // spaces: the long base64 one then needs no quotes (see QuoteArg).
+    static string[] RunWords(string dir, string commandB64)
+    {
+        return new string[] { "env", "CCAP_DIR=" + dir, "CCAP_CMD_B64=" + commandB64, "/bin/sh", dir + "/remote.sh", "run" };
+    }
+
+    // The token directory of R's first line, or null: it goes into C's command unquoted.
+    static string ReadyDir(string line, string token)
+    {
+        const string prefix = "cc-askpass-ready ";
+        if (line == null || !line.StartsWith(prefix, StringComparison.Ordinal)) return null;
+        string dir = line.Substring(prefix.Length);
+        return dir.Length <= DirMax && Regex.IsMatch(dir, "^/[A-Za-z0-9._/+@-]*/cc-askpass-" + token + "$") ? dir : null;
+    }
+
+    static int ReadyMs()
+    {
+        // Tests only, when non-empty.
+        string test = Environment.GetEnvironmentVariable("CC_ASKPASS_TEST_READY_MS");
+        int ms;
+        return !string.IsNullOrEmpty(test) && int.TryParse(test, NumberStyles.None, CultureInfo.InvariantCulture, out ms) ? ms : 60000;
+    }
+
+    // Runs the command as C beside the relay connection R; null when it should run unwrapped.
+    static int? Wrap(string realSsh, string[] args, SshArgs parsed, string shimDir)
+    {
+        string root = Path.GetFullPath(Path.Combine(shimDir, @"..\..\..\.."));
+        byte[] random = new byte[16];
+        using (RNGCryptoServiceProvider rng = new RNGCryptoServiceProvider()) rng.GetBytes(random);
+        string token = BitConverter.ToString(random).Replace("-", "").ToLowerInvariant();
+        string[] remoteWords;
+        byte[] payload;
+        try
+        {
+            // A's one-line command as words; askpass and the ssh wrapper do not fit beside it, so stdin carries them.
+            remoteWords = new string[]
+            {
+                "env", "CCAP_RS_B64=" + Base64File(root, @"bin\remote.sh"), "/bin/sh", "-c", "'" + Eval + "'", "_",
+                "serve-stdin", token
+            };
+            payload = Encoding.ASCII.GetBytes(Base64File(root, @"bin\askpass") + " " + Base64File(root, @"bin\shim\ssh") + "\n");
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine("cc-askpass: cannot read the remote scripts in " + root + "\\bin (" + error.GetType().Name + "); running ssh unwrapped");
+            return null;
+        }
+
+        string commandB64 = Convert.ToBase64String(Pipes.Utf8.GetBytes(parsed.Command));
+        List<string> commandArgs = new List<string>(args);
+        commandArgs.RemoveRange(parsed.CommandStart, args.Length - parsed.CommandStart);
+        int commandAt = commandArgs.Count;
+        commandArgs.AddRange(RunWords(new string('x', DirMax), commandB64));
+        if (QuoteArg(realSsh).Length + 1 + string.Join(" ", commandArgs.ConvertAll(QuoteArg)).Length >= CommandLineMax) return null;
+
+        IntPtr job = Native.KillOnCloseJob();
+        List<string> relayArgs = new List<string>(parsed.RelayOptions);
+        relayArgs.AddRange(new string[] { "-T", "--", parsed.Host });
+        relayArgs.AddRange(remoteWords);
+        Process relay;
+        try
+        {
+            relay = Start(realSsh, relayArgs, true);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+        Native.Join(job, relay);
+
+        // The wrapper is R's only stdin writer: the payload, then one answer per request.
+        Stream relayIn = relay.StandardInput.BaseStream;
+        object inLock = new object();
+        // ssh reads its stdin only once logged in, which may take a typed password: no wait here.
+        Background(delegate { Send(relayIn, inLock, payload); });
+        string dir = null;
+        try
+        {
+            Task<string> ready = relay.StandardOutput.ReadLineAsync();
+            if (ready.Wait(ReadyMs())) dir = ReadyDir(ready.Result, token);
+        }
+        catch (AggregateException)
+        {
+        }
+        if (dir == null)
+        {
+            Kill(relay);
+            return null;
+        }
+
+        commandArgs.RemoveRange(commandAt, commandArgs.Count - commandAt);
+        commandArgs.AddRange(RunWords(dir, commandB64));
+        Process command;
+        try
+        {
+            command = Start(realSsh, commandArgs, false);
+        }
+        catch (Exception)
+        {
+            Kill(relay);
+            return null;
+        }
+        Native.Join(job, command);
+        string name = HostName(parsed.Host);
+        Background(delegate { Relay(relay, relayIn, inLock, realSsh, name); });
+
+        command.WaitForExit();
+        int status = command.ExitCode;
+        // EOF ends R: remote.sh removes the token directory and exits.
+        lock (inLock) relayIn.Dispose();
+        relay.WaitForExit(5000);
+        return status;
+    }
+
+    static void Background(ThreadStart body)
+    {
+        Thread thread = new Thread(body);
+        thread.IsBackground = true;
+        thread.Start();
+    }
+
+    static void Send(Stream relayIn, object inLock, byte[] bytes)
+    {
+        lock (inLock)
+        {
+            try
+            {
+                relayIn.Write(bytes, 0, bytes.Length);
+                relayIn.Flush();
+            }
+            catch (IOException)
+            {
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+    }
+
+    // Each request line R prints (A §4.6) goes to the listener as a relay request; the answer goes
+    // back to R as <remote pid>\t<answer>\n, an empty one when nobody answers.
+    static void Relay(Process relay, Stream relayIn, object inLock, string realSsh, string host)
+    {
+        string pipe = Pipes.Name();
+        try
+        {
+            string line;
+            while ((line = relay.StandardOutput.ReadLine()) != null)
+            {
+                // Remote text: <pid> TAB <prompt> [TAB <via> TAB <reported>], under PIPE_BUF.
+                if (line.Length > 4096) continue;
+                string[] fields = line.Split(new char[] { '\t' }, 4);
+                int pid;
+                if (fields.Length < 2 ||
+                    !int.TryParse(fields[0], NumberStyles.None, CultureInfo.InvariantCulture, out pid)) continue;
+                string via = fields.Length > 2 && fields[2].Length > 0 ? fields[2] + " via " + host : host;
+                string reported = fields.Length > 3 ? fields[3] : "";
+
+                MemoryStream request = new MemoryStream();
+                foreach (byte[] field in new byte[][]
+                {
+                    Pipes.Utf8.GetBytes("relay"), Pipes.Field(host, 255), Pipes.Field(realSsh, 1024),
+                    Pipes.Utf8.GetBytes(fields[0]), Pipes.Field(fields[1], 1000), Pipes.Field(via, 1000),
+                    Pipes.Field(reported, 2000)
+                })
+                {
+                    if (request.Length > 0) request.WriteByte((byte)'\t');
+                    request.Write(field, 0, field.Length);
+                }
+                request.WriteByte((byte)'\n');
+                byte[] answer = Pipes.Request(pipe, request.ToArray()) ?? new byte[0];
+
+                // The answer's bytes go out as they came, never decoded; \n only.
+                MemoryStream reply = new MemoryStream();
+                byte[] head = Encoding.ASCII.GetBytes(fields[0] + "\t");
+                reply.Write(head, 0, head.Length);
+                reply.Write(answer, 0, answer.Length);
+                reply.WriteByte((byte)'\n');
+                Send(relayIn, inLock, reply.ToArray());
+            }
+        }
+        catch (Exception)
+        {
+            // R is gone, or its output is unreadable: the command runs on without the relay
+            // (a crash here would end it).
+        }
     }
 }
 

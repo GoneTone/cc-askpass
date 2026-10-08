@@ -46,7 +46,10 @@ function Start-Program([string]$exe, [string[]]$argv, [hashtable]$vars = @{}, [s
   $info.StandardErrorEncoding = $utf8
   $info.WorkingDirectory = $dir
   $info.EnvironmentVariables.Remove('CC_ASKPASS_PIPE')
-  foreach ($name in $vars.Keys) { $info.EnvironmentVariables[$name] = $vars[$name] }
+  # $null removes a variable.
+  foreach ($name in $vars.Keys) {
+    if ($null -eq $vars[$name]) { $info.EnvironmentVariables.Remove($name) } else { $info.EnvironmentVariables[$name] = $vars[$name] }
+  }
   $process = [System.Diagnostics.Process]::Start($info)
   $null = $started.Add($process)
   [pscustomobject]@{ P = $process; Err = $process.StandardError.ReadToEndAsync(); Pending = $null; Pipe = $null; Token = $null }
@@ -114,6 +117,108 @@ function Test([string]$name, [scriptblock]$body) {
   & $body
 }
 
+# A fake real ssh for the wrapper: it appends its arguments as one JSON line to FAKE_SSH_LOG and
+# plays the relay connection R (serve-stdin), the command connection C (remote.sh run) or a plain
+# ssh as FAKE_SSH_MODE says: record, silent, relay or sleep.
+$fakeSource = @'
+using System;
+using System.IO;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+
+public static class FakeSsh
+{
+    public static int Main(string[] args)
+    {
+        string log = Environment.GetEnvironmentVariable("FAKE_SSH_LOG");
+        string mode = Environment.GetEnvironmentVariable("FAKE_SSH_MODE") ?? "";
+        StringBuilder json = new StringBuilder("{\"argv\":[");
+        for (int i = 0; i < args.Length; i++)
+        {
+            if (i > 0) json.Append(',');
+            json.Append('"');
+            foreach (char c in args[i])
+            {
+                if (c == '"' || c == '\\') json.Append('\\').Append(c);
+                else if (c < ' ') json.Append("\\u").Append(((int)c).ToString("x4"));
+                else json.Append(c);
+            }
+            json.Append('"');
+        }
+        File.AppendAllText(log, json.Append("]}\n").ToString(), new UTF8Encoding(false));
+
+        string all = string.Join(" ", args);
+        Match relay = Regex.Match(all, "serve-stdin ([0-9a-f]{32})");
+        if (relay.Success)
+        {
+            if (mode == "record") return 255;
+            if (mode == "silent") Thread.Sleep(Timeout.Infinite);
+            Console.Out.Write("cc-askpass-ready /tmp/cc-askpass-" + relay.Groups[1].Value + "\n");
+            if (mode != "relay") Thread.Sleep(Timeout.Infinite);
+            Console.Out.Write("junk\nabc\tnot a pid\n77\t[sudo] password for bob: \t\tsudo true\n");
+            using (Stream stdin = Console.OpenStandardInput())
+            using (FileStream copy = new FileStream(log + ".stdin", FileMode.Create, FileAccess.Write, FileShare.ReadWrite))
+            {
+                byte[] buffer = new byte[4096];
+                int n;
+                while ((n = stdin.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    copy.Write(buffer, 0, n);
+                    copy.Flush();
+                }
+            }
+            return 0;
+        }
+        if (all.Contains("remote.sh run"))
+        {
+            if (mode != "relay") Thread.Sleep(Timeout.Infinite);
+            // Ends once R's stdin got the answer.
+            for (int i = 0; i < 300; i++)
+            {
+                Thread.Sleep(100);
+                if (!File.Exists(log + ".stdin")) continue;
+                using (FileStream copy = new FileStream(log + ".stdin", FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (StreamReader reader = new StreamReader(copy))
+                    if (Regex.IsMatch(reader.ReadToEnd(), "\n77\t[^\n]*\n")) return 3;
+            }
+            return 4;
+        }
+        Console.Out.Write("fake-out\n");
+        return 7;
+    }
+}
+'@
+
+# Runs the built shim\ssh.exe with the fake ssh after it on PATH and a live listener; $vars
+# overrides the defaults ($null removes one). Each run gets its own log.
+function Start-Wrapper([string[]]$argv, [hashtable]$vars = @{}) {
+  $script:runs++
+  $log = Join-Path $tmp "ssh-$script:runs.log"
+  $all = @{
+    PATH = "$shim;$fakebin;$env:PATH"; CC_ASKPASS_PIPE = $script:serve.Pipe; CC_ASKPASS_WRAP = '1'
+    SSH_ASKPASS = $helper; CC_ASKPASS_EXCLUDE = $null; CC_ASKPASS_TEST_READY_MS = $null
+    FAKE_SSH_MODE = 'record'; FAKE_SSH_LOG = $log
+  }
+  foreach ($name in $vars.Keys) { $all[$name] = $vars[$name] }
+  $program = Start-Program $wrapper $argv $all
+  $program | Add-Member Log $log
+  $program
+}
+
+# The fake ssh's runs so far, one JSON line each.
+function Get-Runs($program) {
+  # The comma keeps a one-line array an array.
+  if (Test-Path -LiteralPath $program.Log) { ,@(Get-Content -LiteralPath $program.Log -Encoding UTF8) } else { ,@() }
+}
+
+function Test-Argv([string]$run, [string[]]$want) {
+  $got = @(($run | ConvertFrom-Json).argv)
+  if ($got.Count -ne $want.Count) { return $false }
+  for ($i = 0; $i -lt $got.Count; $i++) { if ($got[$i] -cne $want[$i]) { return $false } }
+  $true
+}
+
 try {
   $session = 'test-' + [guid]::NewGuid().ToString('N')
 
@@ -125,8 +230,6 @@ try {
     Check (-not (Test-Path -LiteralPath (Join-Path $tmp 'out\a'))) 'the first build directory is still there'
     Check (Test-Path -LiteralPath $exe) 'no cc-askpass.exe in the second build'
     Check (Test-Path -LiteralPath (Join-Path $tmp 'out\keep\shim')) 'a directory without build files was removed'
-    $wrapper = Wait-Program (Start-Program (Join-Path $tmp 'out\b\shim\ssh.exe') @('host'))
-    Check ($wrapper.Code -eq 255) "the ssh stub exited $($wrapper.Code)"
   }
 
   Test 'a build in use stays until it is free' {
@@ -277,6 +380,177 @@ try {
     Check ($result.Err -match 'cc-askpass mod') "stderr is '$($result.Err)'"
   }
 
+  # The wrapper reads bin\ from the plugin root, four levels above its shim directory.
+  $plug = Join-Path $tmp 'plug'
+  $null = New-Item -ItemType Directory $plug
+  Copy-Item -Recurse -LiteralPath (Join-Path $root 'bin') -Destination (Join-Path $plug 'bin')
+  $helper = Invoke-Build (Join-Path $plug 'win\out\h')
+  $shim = Join-Path $plug 'win\out\h\shim'
+  $wrapper = Join-Path $shim 'ssh.exe'
+  $fakebin = Join-Path $tmp 'fakebin'
+  $null = New-Item -ItemType Directory $fakebin
+  $fake = Join-Path $fakebin 'ssh.exe'
+  Add-Type -TypeDefinition $fakeSource -OutputAssembly $fake -OutputType ConsoleApplication
+  $runs = 0
+
+  Test 'wrap decisions match the sh wrapper' {
+    # The cases of expect_decision in tests/ssh.sh (relay.pid has no Windows counterpart) and a
+    # few of its passes_through ones: want, variables, arguments.
+    $cases = @(
+      @('wrap', @{}, @('h', 'sudo', 'true')),
+      @('no', @{}, @('h', '/usr/bin/git-upload-pack', 'x')),
+      @('no', @{}, @('h', 'scp', '-t', '/x')),
+      @('no', @{}, @('h', 'rsync', '--server', '-e.L', '.', '/x')),
+      @('no', @{}, @('h', 'borg', 'serve', '--restrict-to-path', '/r')),
+      @('wrap', @{}, @('h', 'sudo', 'rsync', '--server', '-e.L', '.', '/x')),
+      @('no', @{ CC_ASKPASS_EXCLUDE = '*.internal' }, @('alice@db.internal', 'sudo', 'true')),
+      @('no', @{ CC_ASKPASS_EXCLUDE = '*.internal' }, @('ssh://alice@db.internal:2222', 'sudo', 'true')),
+      @('wrap', @{ CC_ASKPASS_EXCLUDE = '*.internal' }, @('alice@db.example', 'sudo', 'true')),
+      @('no', @{ CC_ASKPASS_EXCLUDE = "x`nfe80::1" }, @('fe80::1', 'sudo', 'true')),
+      @('no', @{ CC_ASKPASS_EXCLUDE = "x[`ndb[0-9].lan" }, @('db1.lan', 'sudo', 'true')),
+      @('wrap', @{ CC_ASKPASS_EXCLUDE = "x[`ndb[!0-9].lan" }, @('db1.lan', 'sudo', 'true')),
+      @('no', @{ CC_ASKPASS_PIPE = 'cc-askpass-test-nobody' }, @('h', 'sudo', 'true')),
+      @('no', @{ SSH_ASKPASS = $null }, @('h', 'sudo', 'true')),
+      @('no', @{ SSH_ASKPASS = 'C:\x' }, @('h', 'sudo', 'true')),
+      @('no', @{ CC_ASKPASS_WRAP = $null }, @('h', 'sudo', 'true')),
+      @('no', @{}, @('-N', 'h', 'sudo', 'true')),
+      @('no', @{}, @('h', '-N', '-L', '1:a:2')),
+      @('no', @{}, @('-o', 'User alice', 'h', 'sudo', 'true')),
+      @('no', @{}, @('-oUser alice', 'h', 'sudo', 'true')),
+      @('no', @{}, @('-o', "User`talice", 'h', 'sudo', 'true')),
+      @('no', @{}, @('alice smith@h', 'sudo', 'true')),
+      @('wrap', @{}, @('-o', 'User=alice', 'h', 'sudo', 'true')),
+      @('wrap', @{}, @('h', '-o', 'User alice', 'sudo', 'true')),
+      @('wrap', @{}, @('-tp22', 'h', 'sudo', 'true')),
+      @('no', @{}, @('h')),
+      @('no', @{}, @('-O', 'check', 'h')),
+      @('no', @{}, @('-s', 'h', 'sftp')),
+      @('no', @{}, @('-f', 'h', 'cmd')),
+      @('no', @{}, @('-Z', 'h', 'cmd')),
+      @('no', @{}, @('git@github.com', 'git-upload-pack', 'a/b.git'))
+    )
+    foreach ($case in $cases) {
+      $want, $vars, $argv = $case
+      $run = Start-Wrapper $argv $vars
+      $result = Wait-Program $run 10000
+      $all = Get-Runs $run
+      $label = "$want for $($argv -join ' ')"
+      Check ($result.Code -eq 7 -and $result.Out -ceq "fake-out`n") "${label}: exited $($result.Code), stdout '$($result.Out)', stderr '$($result.Err)'"
+      if ($want -eq 'wrap') {
+        Check ($all.Count -eq 2 -and $all[0] -match 'serve-stdin') "${label}: no relay connection first: $all"
+      } else {
+        Check ($all.Count -eq 1) "${label}: $($all.Count) runs: $all"
+      }
+      Check (Test-Argv $all[-1] $argv) "${label}: the real ssh got $($all[-1])"
+    }
+  }
+
+  Test 'arguments reach the real ssh unchanged' {
+    $argv = @('-o', 'User a b', 'h', '*', '', 'a\\"b', 'trailing\\')
+    $run = Start-Wrapper $argv
+    $result = Wait-Program $run
+    $all = Get-Runs $run
+    Check ($all.Count -eq 1 -and (Test-Argv $all[0] $argv)) "the real ssh got $all"
+    Check ($result.Code -eq 7 -and $result.Out -ceq "fake-out`n") "exited $($result.Code) with '$($result.Out)'"
+  }
+
+  Test 'remoteHosts off passes through' {
+    $run = Start-Wrapper @('h', 'sudo', 'true') @{ CC_ASKPASS_WRAP = $null }
+    $null = Wait-Program $run
+    $all = Get-Runs $run
+    Check ($all.Count -eq 1 -and (Test-Argv $all[0] @('h', 'sudo', 'true'))) "the real ssh got $all"
+  }
+
+  Test 'another cc-askpass shim on PATH is skipped' {
+    $run = Start-Wrapper @('h') @{ PATH = "$shim;$(Join-Path $tmp 'out\b\shim');$fakebin" }
+    $result = Wait-Program $run
+    Check ($result.Code -eq 7 -and (Get-Runs $run).Count -eq 1) "exited $($result.Code): $($result.Err)"
+  }
+
+  Test 'a host that never says ready runs unwrapped' {
+    $run = Start-Wrapper @('h', 'sudo', 'true') @{ FAKE_SSH_MODE = 'silent'; CC_ASKPASS_TEST_READY_MS = '500' }
+    $result = Wait-Program $run 10000
+    $all = Get-Runs $run
+    Check ($all.Count -eq 2 -and $all[0] -match 'serve-stdin' -and (Test-Argv $all[1] @('h', 'sudo', 'true'))) "runs: $all"
+    Check ($result.Code -eq 7) "exited $($result.Code): $($result.Err)"
+  }
+
+  Test 'relay request reaches the listener and the answer reaches R' {
+    $password = "p&w|`"x^%!<y> " + [char]0xE9
+    $run = Start-Wrapper @('server', 'sudo', 'true') @{ FAKE_SSH_MODE = 'relay' }
+    $request = Read-Request $serve 10000
+    Check ($request.client.exe -eq $wrapper) "client.exe is $($request.client.exe)"
+    Check ($request.prompt -ceq '[sudo] password for bob: ') "prompt is '$($request.prompt)'"
+    $relay = $request.relay
+    Check ($relay.host -ceq 'server' -and $relay.realSsh -eq $fake -and $relay.remotePid -eq 77) "relay is $($relay | ConvertTo-Json -Compress)"
+    Check ($relay.via -ceq 'server' -and $relay.reported -ceq 'sudo true') "relay is $($relay | ConvertTo-Json -Compress)"
+    Check ($null -eq (Read-Line $serve 300)) 'a malformed line was relayed'
+    Send-Reply $serve $request.id $password
+    $result = Wait-Program $run 10000
+    Check ($result.Code -eq 3) "exited $($result.Code): $($result.Err)"
+    Check ($result.Out -ceq '') "stdout is '$($result.Out)'"
+
+    $stdin = [IO.File]::ReadAllText("$($run.Log).stdin", $utf8)
+    $lines = $stdin -split "`n"
+    Check ($lines.Count -eq 3 -and $lines[2] -eq '') "R's stdin is '$stdin'"
+    $payload = $lines[0] -split ' '
+    Check ($payload.Count -eq 2) "payload line is '$($lines[0])'"
+    $askpass = [IO.File]::ReadAllBytes((Join-Path $root 'bin\askpass'))
+    Check ([Convert]::ToBase64String($askpass) -ceq $payload[0]) 'the payload does not carry bin\askpass'
+    Check ($lines[1] -ceq "77`t$password") "R got '$($lines[1])'"
+
+    $all = Get-Runs $run
+    $r = @(($all[0] | ConvertFrom-Json).argv)
+    # ssh joins the words of the remote command with spaces: A's one-line bootstrap shape.
+    Check (($r -join ' ') -cmatch "^-T -- server env CCAP_RS_B64=[A-Za-z0-9+/=]+ /bin/sh -c 'eval .*' _ serve-stdin [0-9a-f]{32}$") "R ran $($all[0])"
+    $b64 = [Convert]::ToBase64String($utf8.GetBytes('sudo true'))
+    $c = @(($all[1] | ConvertFrom-Json).argv)
+    Check ($c.Count -eq 7 -and $c[0] -ceq 'server' -and ($c[1..6] -join ' ') -cmatch "^env CCAP_DIR=(/tmp/cc-askpass-[0-9a-f]{32}) CCAP_CMD_B64=$([regex]::Escape($b64)) /bin/sh \1/remote.sh run$") "C ran $($all[1])"
+  }
+
+  Test 'killing the wrapper ends both connections' {
+    $run = Start-Wrapper @('h', 'sleep', '60') @{ FAKE_SSH_MODE = 'sleep' }
+    for ($i = 0; $i -lt 100 -and (Get-Runs $run).Count -lt 2; $i++) { Start-Sleep -Milliseconds 100 }
+    Check ((Get-Runs $run).Count -eq 2) "C did not start: $(Get-Runs $run)"
+    $run.P.Kill()
+    $deadline = (Get-Date).AddSeconds(2)
+    do {
+      $left = @(Get-Process ssh -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $fake })
+      if ($left.Count -eq 0) { break }
+      Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    Check ($left.Count -eq 0) "$($left.Count) fake ssh processes are left"
+  }
+
+  Test 'no real ssh fails with 255' {
+    $result = Wait-Program (Start-Wrapper @('h', 'true') @{ PATH = "$shim;$env:SystemRoot\System32" })
+    Check ($result.Code -eq 255) "exited $($result.Code)"
+    Check ($result.Err.Trim() -ceq 'cc-askpass: ssh: command not found') "stderr is '$($result.Err)'"
+  }
+
+  # Optional: CC_ASKPASS_TEST_SSH names a reachable host with key login, e.g.
+  # 'gonetone@127.0.0.1 -p 2299 -i C:\key -o StrictHostKeyChecking=no'.
+  if ($env:CC_ASKPASS_TEST_SSH) {
+    Test 'end to end through a real sshd' {
+      $target = $env:CC_ASKPASS_TEST_SSH -split ' '
+      $vars = @{ PATH = "$shim;$env:PATH" }
+      $result = Wait-Program (Start-Wrapper ($target + 'echo ok') $vars) 60000
+      Check ($result.Code -eq 0 -and $result.Out -match '^ok\r?\n$') "exited $($result.Code) with '$($result.Out)': $($result.Err)"
+      $result = Wait-Program (Start-Wrapper ($target + 'printf %s "$SUDO_ASKPASS"') $vars) 60000
+      Check ($result.Out -cmatch '/cc-askpass-[0-9a-f]{32}/askpass$') "SUDO_ASKPASS is '$($result.Out)': $($result.Err)"
+      # Git's ssh (MSYS) cuts a quoted argument at 8,186 characters; the command travels as base64.
+      $long = 'x' * 9000
+      $result = Wait-Program (Start-Wrapper ($target + "printf %s $long | wc -c") $vars) 60000
+      Check ($result.Out.Trim() -ceq '9000') "a long command printed '$($result.Out)': $($result.Err)"
+      $run = Start-Wrapper ($target + '"$SUDO_ASKPASS" "remote pw: "') $vars
+      $request = Read-Request $serve 30000
+      Check ($request.prompt -ceq 'remote pw: ' -and $request.relay.host -ceq '127.0.0.1') "request is $($request | ConvertTo-Json -Compress)"
+      Send-Reply $serve $request.id 'e2e pw'
+      $result = Wait-Program $run 30000
+      Check ($result.Code -eq 0 -and $result.Out -ceq "e2e pw`n") "the remote askpass printed '$($result.Out)': $($result.Err)"
+    }
+  }
+
   'PASS: all Windows helper tests'
 } catch {
   "FAIL: ${current}: $($_.Exception.Message)"
@@ -286,6 +560,10 @@ try {
     if (-not $process.HasExited) {
       try { $process.Kill(); $null = $process.WaitForExit(5000) } catch { }
     }
+  }
+  # The fake ssh runs as the wrapper's child, not ours: a failed test may leave it behind.
+  Get-Process ssh -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$tmp\*" } | ForEach-Object {
+    try { $_.Kill() } catch { }
   }
   # A killed exe stays locked for a moment.
   for ($i = 0; $i -lt 20 -and (Test-Path -LiteralPath $tmp); $i++) {
