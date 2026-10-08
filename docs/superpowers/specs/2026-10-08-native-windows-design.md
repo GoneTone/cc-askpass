@@ -364,6 +364,11 @@ only (no local sudo).
 - Git's ssh started from a native process expands unquoted wildcards (`*` became a file name
   in the working directory); quoted arguments arrive intact (`"*"`, `"a*b"`, `"a\"b"`).
 - ARM64: no hardware at hand; untested.
+- Found in the manual run (2026-10-09): the PowerShell tool's console is UTF-8 (code page
+  65001), and .NET Framework writes `Console.InputEncoding`'s preamble into a redirected
+  stdin as the process starts, so R's payload began with a BOM and the remote base64 failed.
+  The wrapper switches its own `Console.InputEncoding` to UTF-8 without a preamble (the same
+  code page, so the console is unchanged) before starting R.
 
 ## 12. Changes to earlier designs
 

@@ -739,6 +739,19 @@ static class SshWrapper
         info.RedirectStandardInput = redirect;
         info.RedirectStandardOutput = redirect;
         if (redirect) info.StandardOutputEncoding = Pipes.Utf8;
+        // A redirected stdin gets Console.InputEncoding's preamble as the process starts: on a
+        // UTF-8 console (pwsh) a BOM ahead of R's payload. The same code page without one leaves
+        // the console as it is.
+        if (redirect && Console.InputEncoding.CodePage == 65001 && Console.InputEncoding.GetPreamble().Length > 0)
+        {
+            try
+            {
+                Console.InputEncoding = Pipes.Utf8;
+            }
+            catch (IOException)
+            {
+            }
+        }
         return Process.Start(info);
     }
 

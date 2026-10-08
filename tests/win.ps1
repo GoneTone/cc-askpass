@@ -579,8 +579,17 @@ try {
 
   Test 'relay request reaches the listener and the answer reaches R' {
     $password = "p&w|`"x^%!<y> " + [char]0xE9
-    $run = Start-Wrapper @('server', 'sudo', 'true') @{ FAKE_SSH_MODE = 'relay' }
-    $request = Read-Request $serve 10000
+    # On a UTF-8 console, as pwsh sets it, .NET Framework would put a BOM ahead of R's stdin.
+    $consoleInput = [Console]::InputEncoding
+    [Console]::InputEncoding = New-Object System.Text.UTF8Encoding $true
+    try {
+      Check ([Console]::InputEncoding.CodePage -eq 65001) 'the console did not switch to UTF-8'
+      $run = Start-Wrapper @('server', 'sudo', 'true') @{ FAKE_SSH_MODE = 'relay' }
+      # The request comes through R: R has started.
+      $request = Read-Request $serve 10000
+    } finally {
+      [Console]::InputEncoding = $consoleInput
+    }
     Check ($request.client.exe -eq $wrapper) "client.exe is $($request.client.exe)"
     Check ($request.prompt -ceq '[sudo] password for bob: ') "prompt is '$($request.prompt)'"
     $relay = $request.relay
@@ -592,6 +601,8 @@ try {
     Check ($result.Code -eq 3) "exited $($result.Code): $($result.Err)"
     Check ($result.Out -ceq '') "stdout is '$($result.Out)'"
 
+    $bytes = [IO.File]::ReadAllBytes("$($run.Log).stdin")
+    Check ($bytes.Length -gt 0 -and $bytes[0] -ne 0xEF) "R's stdin starts with a BOM"
     $stdin = [IO.File]::ReadAllText("$($run.Log).stdin", $utf8)
     $lines = $stdin -split "`n"
     Check ($lines.Count -eq 3 -and $lines[2] -eq '') "R's stdin is '$stdin'"
