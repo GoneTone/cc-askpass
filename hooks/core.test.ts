@@ -6,6 +6,7 @@ import {
   askedByLine,
   bashShellArgs,
   bashSshFunction,
+  isBashSshFunction,
   claudePidOf,
   clipLines,
   matchBashCommand,
@@ -283,6 +284,13 @@ test('bashSshFunction single-quotes the wrapper path', () => {
   expect(bashSshFunction("C:\\Users\\a$b`c'd\\shim\\ssh.exe")).toBe(
     "() {  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' 'C:/Users/a$b`c'\\''d/shim/ssh.exe' \"$@\"\n}",
   )
+})
+
+test('isBashSshFunction knows ours, for any path, and nothing else', () => {
+  expect(isBashSshFunction(bashSshFunction('C:\\p\\shim\\ssh.exe'))).toBe(true)
+  expect(isBashSshFunction(bashSshFunction("C:\\Users\\a$b`c'd\\shim\\ssh.exe"))).toBe(true)
+  expect(isBashSshFunction('() {  command ssh -v "$@"\n}')).toBe(false)
+  expect(isBashSshFunction('')).toBe(false)
 })
 
 test('parseWinReady reads the pipe name, a 32-digit token and the helper path', () => {

@@ -17,6 +17,10 @@ try {
     # Its holder died; the mutex is now ours.
   }
   try {
+    # A build killed mid-way (the mod gives it 60 s) leaves its temporary exe; holding the mutex,
+    # no other build is writing one.
+    Get-ChildItem -LiteralPath $OutDir -Filter 'cc-askpass.*.tmp.exe' -File |
+      Remove-Item -Force -ErrorAction SilentlyContinue
     if (-not (Test-Path -LiteralPath (Join-Path $OutDir 'cc-askpass.exe'))) {
       $tmp = Join-Path $OutDir "cc-askpass.$PID.tmp.exe"
       Add-Type -TypeDefinition (Get-Content -Raw -Encoding UTF8 -LiteralPath $Source) -OutputAssembly $tmp `

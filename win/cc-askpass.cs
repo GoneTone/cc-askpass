@@ -140,6 +140,8 @@ static class Native
     [DllImport("kernel32.dll")]
     static extern IntPtr GetCurrentProcess();
 
+    static IntPtr killOnCloseJob;
+
     // Puts this process into a job whose processes all end when its last handle closes, so every
     // child is born inside it. The handle is never closed here (it goes with this process) and is
     // not inheritable, so no child keeps the job alive. False (Windows error in error) on failure.
@@ -152,7 +154,16 @@ static class Native
             SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref info, Marshal.SizeOf(info)) &&
             AssignProcessToJobObject(job, GetCurrentProcess());
         error = ok ? 0 : Marshal.GetLastWin32Error();
+        if (ok) killOnCloseJob = job;
         return ok;
+    }
+
+    // Lets the job's processes outlive this one after all.
+    public static void KeepJobProcesses()
+    {
+        if (killOnCloseJob == IntPtr.Zero) return;
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+        SetInformationJobObject(killOnCloseJob, JobObjectExtendedLimitInformation, ref info, Marshal.SizeOf(info));
     }
 
     // A pipe instance only the current user can open; `first` fails while any instance of the name exists.
@@ -502,13 +513,16 @@ static class SshWrapper
             if (status != null) return status.Value;
         }
         // As exec does on Linux: killing the wrapper ends ssh too (a -L tunnel frees its port),
-        // unless ssh forks to outlive it.
-        if (!parsed.Forks) EnterJob();
+        // unless ssh forks to outlive it. Without a job this is plain ssh: no warning.
+        if (!parsed.Forks) EnterJob(false);
         try
         {
             using (Process ssh = Start(realSsh, words, false))
             {
                 ssh.WaitForExit();
+                // ssh ended by itself: what it left in the background (a ControlPersist master, a
+                // config's ForkAfterAuthentication) stays, as on Linux.
+                Native.KeepJobProcesses();
                 return ssh.ExitCode;
             }
         }
@@ -801,7 +815,7 @@ static class SshWrapper
         commandArgs.AddRange(RunWords(new string('x', DirMax), commandB64));
         if (QuoteArg(realSsh).Length + 1 + string.Join(" ", commandArgs.ConvertAll(QuoteArg)).Length >= CommandLineMax) return null;
 
-        EnterJob();
+        EnterJob(true);
         // R forwards nothing (C's own forwards would not bind) and never has a terminal (one would
         // echo the answer back as a request line). The first -o wins; -x -a -T win after the caller's.
         List<string> relayArgs = new List<string> { "-o", "ClearAllForwardings=yes" };
@@ -867,12 +881,12 @@ static class SshWrapper
     static bool inJob;
 
     // Every ssh started from here on ends with this process (once is enough: the job is kept).
-    static void EnterJob()
+    static void EnterJob(bool warn)
     {
         if (inJob) return;
         inJob = true;
         int jobError;
-        if (!Native.EnterKillOnCloseJob(out jobError))
+        if (!Native.EnterKillOnCloseJob(out jobError) && warn)
             Console.Error.WriteLine("cc-askpass: could not set up a job object (Windows error " + jobError +
                 "); ssh processes may outlive an interrupted command");
     }

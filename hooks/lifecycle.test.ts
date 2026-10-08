@@ -380,7 +380,8 @@ async function winWorld(
   options: {
     isBuilt?: boolean | (() => boolean)
     source?: string | null
-    build?: Partial<ProcessRunResult>
+    env?: Record<string, string>
+    build?: Partial<ProcessRunResult> | { deny: string }
     check?: Partial<ProcessRunResult>
   } = {},
 ) {
@@ -480,6 +481,33 @@ test('a Windows listener that ends takes the shim back off', async ($, on) => {
   expect(w.rec.envValue('BASH_FUNC_ssh%%')).toBe(undefined)
 })
 
+test("a Windows listener that ends puts back the person's own ssh function", async ($, on) => {
+  const own = '() {  command ssh -v "$@"\n}'
+  const w = await winWorld($, on, { env: { 'BASH_FUNC_ssh%%': own } })
+  expect(w.rec.envValue('BASH_FUNC_ssh%%')).not.toBe(own)
+  await w.ready()
+  await w.stop()
+  expect(w.rec.envValue('BASH_FUNC_ssh%%')).toBe(own)
+})
+
+test('a second Windows start keeps its shim when the old listener gives up meanwhile', async ($, on) => {
+  const w = await winWorld($, on)
+  // Holds the second start between setting the shim and starting its listener.
+  let release = () => {}
+  w.rec.holdStarts(new Promise(resolve => (release = resolve)))
+  const second = $.session.start(START)
+  // The first listener's ready timer runs out while the second start waits.
+  await w.clock.advance(5000)
+  release()
+  await second
+  await w.ready()
+  expect(w.serve.argvs).toHaveLength(2)
+  expect(w.rec.envValue('PATH')).toBe(`${w.outDir}\\shim;${WIN_PATH}`)
+  expect(w.rec.envValue('BASH_FUNC_ssh%%')).toBeDefined()
+  expect(w.rec.envValue('CC_ASKPASS_PIPE')).toBe(WIN_PIPE)
+  expect(w.rec.toasts).toEqual([])
+})
+
 test('Windows starts the listener from the built exe', async ($, on) => {
   const w = await winWorld($, on)
   expect(w.serve.argvs).toEqual([[`${w.outDir}\\cc-askpass.exe`, 'serve', SESSION_ID]])
@@ -519,6 +547,19 @@ test('a build that fails after another session built the helper counts as built'
   expect(w.builds()).toHaveLength(1)
   expect(w.rec.toasts).toEqual([])
   expect(w.serve.argvs).toEqual([[w.exe, 'serve', SESSION_ID]])
+})
+
+test('a build that times out after another session built the helper counts as built', async ($, on) => {
+  let checks = 0
+  const w = await winWorld($, on, { isBuilt: () => checks++ > 0, build: { deny: 'timed out after 60000 ms' } })
+  expect(w.rec.toasts).toEqual([])
+  expect(w.serve.argvs).toEqual([[w.exe, 'serve', SESSION_ID]])
+})
+
+test('a build that times out names the timeout', async ($, on) => {
+  const w = await winWorld($, on, { isBuilt: false, build: { deny: 'timed out after 60000 ms' } })
+  expect(w.rec.toasts).toHaveLength(1)
+  expect(w.rec.toasts[0]).toMatch(/^cc-askpass: could not build the Windows helper: .*timed out after 60000 ms/)
 })
 
 test('a missing helper source counts as a failed build', async ($, on) => {

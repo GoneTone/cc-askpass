@@ -96,6 +96,11 @@ export function bashSshFunction(shimExe: string): string {
   return `() {  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' ${quoted} "$@"\n}`
 }
 
+/** Whether `text` is a function `bashSshFunction` wrote, for any shim path. */
+export function isBashSshFunction(text: string): boolean {
+  return /^\(\) \{ {2}MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='\*' '.*' "\$@"\n\}$/s.test(text)
+}
+
 /**
  * 64-bit FNV-1a of `text`'s UTF-16 code units, low byte first, as 16 hex digits: names the
  * Windows helper's build after its source.

@@ -52,9 +52,12 @@ export const WIN_PATH = 'C:\\Windows\\system32;C:\\Windows'
  * Answers as native Windows: `OS`, `SystemRoot` and PATH, the helper's source (none with
  * `source: null`), and whether its build exists. `root()` is the plugin root the mod read under.
  */
-export function windowsWorld(on: On, options: { isBuilt?: boolean | (() => boolean); source?: string | null } = {}) {
+export function windowsWorld(
+  on: On,
+  options: { isBuilt?: boolean | (() => boolean); source?: string | null; env?: Record<string, string> } = {},
+) {
   const reads: string[] = []
-  mock.env(on, { OS: 'Windows_NT', SystemRoot: 'C:\\Windows', PATH: WIN_PATH })
+  mock.env(on, { OS: 'Windows_NT', SystemRoot: 'C:\\Windows', PATH: WIN_PATH, ...options.env })
   on('fs.read', (_$, e) => {
     reads.push(e.path)
     if (options.source === null) return { deny: `ENOENT: no such file, open '${e.path}'` }
@@ -74,10 +77,13 @@ export type RunCall = { argv: readonly string[]; stdin?: string; env?: Record<st
 
 /**
  * Records what the mod does to the world beneath it. `answer` decides each
- * `$.process.run` result; unanswered commands exit 0 with no output, except the Windows
- * helper run bare, which answers as a working helper does.
+ * `$.process.run` result (`{ deny }` makes the run throw, as a timeout does); unanswered commands
+ * exit 0 with no output, except the Windows helper run bare, which answers as a working helper does.
  */
-export function recorder(on: On, answer: (argv: readonly string[]) => Partial<ProcessRunResult> | undefined = () => undefined) {
+export function recorder(
+  on: On,
+  answer: (argv: readonly string[]) => Partial<ProcessRunResult> | { deny: string } | undefined = () => undefined,
+) {
   const envSets: { name: string; value?: string }[] = []
   const toasts: string[] = []
   const logs: string[] = []
@@ -87,8 +93,12 @@ export function recorder(on: On, answer: (argv: readonly string[]) => Partial<Pr
   const closes: string[] = []
   let placeOpens = true
   let isOpenBroken = false
+  let startHold: Promise<void> = Promise.resolve()
 
-  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.start', async (_$, e) => {
+    await startHold
+    return { cwd: e.cwd }
+  })
   on('session.end', () => ({ sessionId: SESSION_ID }))
   on('session.id', () => ({ value: SESSION_ID }))
   // The engine's system prompt, reduced to one section.
@@ -114,8 +124,10 @@ export function recorder(on: On, answer: (argv: readonly string[]) => Partial<Pr
   on('process.run', (_$, e) => {
     runs.push({ argv: e.argv, stdin: e.init?.stdin, ...(e.init?.env === undefined ? {} : { env: e.init.env }) })
     const helper = e.argv.length === 1 && e.argv[0]?.endsWith('\\cc-askpass.exe') ? { exitCode: 1, stderr: WIN_NOT_SET } : {}
+    const answered = answer(e.argv)
+    if (answered !== undefined && 'deny' in answered) return { deny: answered.deny }
     return {
-      value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false, ...helper, ...answer(e.argv) },
+      value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false, ...helper, ...answered },
     }
   })
   on('ui.open', (_$, e) => {
@@ -143,6 +155,10 @@ export function recorder(on: On, answer: (argv: readonly string[]) => Partial<Pr
     /** Makes later `ui.open` calls throw, as an engine refusal does. */
     breakOpen() {
       isOpenBroken = true
+    },
+    /** Holds the engine's part of every later session.start until `until` settles. */
+    holdStarts(until: Promise<void>) {
+      startHold = until
     },
     envValue(name: string) {
       return envSets.filter(set => set.name === name).at(-1)?.value

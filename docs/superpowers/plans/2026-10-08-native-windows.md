@@ -242,7 +242,7 @@ git commit -m "feat: Windows helper for askpass prompts over a named pipe"
   ```
   `winAskSource` (paths compared case-insensitively): client is `helperExe` → `program` with `parent.exe` (or `unverified` with null when `parent` is null); client is `shimExe` and `relay` set → `relay` with `host`, `realSsh`; anything else → `unverified` with `client.exe`.
   `fnv1a64`: offset basis `0xcbf29ce484222325`, prime `0x100000001b3`, over the UTF-16 code units of `text` taken as bytes low then high, with `BigInt` arithmetic masked to 64 bits.
-- Produces (windows.ts): `buildHelper($: EngineInterface, root: string): Promise<{ outDir: string } | { error: string }>`; `winReply($: EngineInterface, exe: string, token: string, id: number, password: string): Promise<void>` (runs `[exe, 'reply']` with `stdin` `${token}\t${id}\n${password}\n`, 5 s timeout, logs failures).
+- Produces (windows.ts): `buildHelper($: EngineInterface, root: string): Promise<{ outDir: string } | { error: string }>`; `winReply($: EngineInterface, exe: string, token: string, id: number, password: string): Promise<void>` (runs `[exe, '--reply']` with `stdin` `${token}\t${id}\n${password}\n`, 5 s timeout, logs failures).
 - register.tsx: a module-level `isWin`; `reply`, `isRequestAlive`, `findClaudeCommand`, `setEnv`, `unsetEnv`, `runServe`, `session.start`, `session.end` and `prompt.compose` branch on it. `isRequestAlive` on Windows: the id is not in a `goneIds` set (no `kill -0`). Windows `Requester`: `pid` = client pid, `comm` = parent exe basename without `.exe`, `command` = `parent.args`, `isSudo: false`, `remote` from `relay` (`via`/`reported` cleaned as today).
 - Bash on Windows (spec §5.3, §11): in `session.start` before `next(e)` also set `BASH_FUNC_ssh%%` to `() {  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "<shim ssh.exe with forward slashes>" "$@"\n}` (a reload sets it again; never unset). Lifecycle test `Windows defines the bash ssh function`: the env value equals that string with `<root>/win/out/<hash>/shim/ssh.exe` in forward slashes.
 - `Claude ran:` on Windows: first try `matchBashCommand` over each ancestor's args; otherwise, if an ancestor's args contain `$__claudeCodeScript` and exactly one PowerShell tool call is in progress, that call's command. Track PowerShell calls in `on('tool.call', { tool: 'PowerShell' }, …)`: add before `await next(e)`, remove after (also on throw). Record Bash calls on Windows as today.
@@ -258,7 +258,7 @@ git commit -m "feat: Windows helper for askpass prompts over a named pipe"
   - `Windows system prompt note covers ssh only`.
 - [ ] **Step 3: Write the failing pane tests** (Windows world emitting JSON lines):
   - `a Windows request shows the asking program`: client = helper exe, parent `C:\Windows\System32\OpenSSH\ssh.exe` → pane heading `ssh (pid …) needs a password`, `Asked by: C:\Windows\System32\OpenSSH\ssh.exe`.
-  - `a Windows reply goes through the helper`: Enter `PASSWORD` → one run `[<exe>, 'reply']` with stdin `${token}\t${id}\n${PASSWORD}\n`; no `sh` run.
+  - `a Windows reply goes through the helper`: Enter `PASSWORD` → one run `[<exe>, '--reply']` with stdin `${token}\t${id}\n${PASSWORD}\n`; no `sh` run.
   - `a direct pipe client shows as unverified`: client `C:\x\evil.exe` → `Asked by: C:\x\evil.exe (unverified)` and the warning.
   - `a Windows relay shows the wrapper and the real ssh`: client = shim exe with `relay` → `remote` tag, `Asked by: cc-askpass ssh wrapper → server (C:\Windows\System32\OpenSSH\ssh.exe)`.
   - `gone closes the pane`: `{"gone":id}` → pane closed, no reply run.

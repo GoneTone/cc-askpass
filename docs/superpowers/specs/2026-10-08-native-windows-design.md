@@ -159,7 +159,8 @@ Before `next(e)`, as on Linux, and only with a person at the prompt:
    to a temporary name of its own (`cc-askpass.<pid>.tmp.exe`) and renames, so a half-written
    exe is never used. Builds into one directory (sessions starting at once) take turns under a
    named mutex, and one that finds `cc-askpass.exe` already there is done; the mod also takes
-   a failed build as done when `cc-askpass.exe` exists afterwards. It then removes other
+   a failed (or timed-out) build as done when `cc-askpass.exe` exists afterwards. Under the
+   mutex a build first deletes temporary exes a killed build left. It then removes other
    `win/out/*` directories, skipping files still locked by running processes; that clean-up
    never fails a finished build. Windows PowerShell 5.1 is always used, whatever the tools run.
 2. Run the built `cc-askpass.exe` once, bare and with `CC_ASKPASS_PIPE` empty: a helper that
@@ -269,7 +270,10 @@ Linux, macOS and WSL keep A's ControlMaster design. On Windows `shim\ssh.exe` do
    killing the wrapper (Bash tool timeout, Ctrl+C) ends both; the remote trap cleans up on
    hang-up as in A. A pass-through ssh runs in the same job, as `exec` leaves no wrapper
    behind on Linux (a killed `ssh -N -L` frees its port), except when it forks (`-f`,
-   `-o ForkAfterAuthentication=yes`) and must outlive the wrapper.
+   `-o ForkAfterAuthentication=yes`) and must outlive the wrapper. When a pass-through ssh
+   ends by itself the wrapper lifts the kill-on-close limit first, so what ssh left in the
+   background (a ControlPersist master, a config's ForkAfterAuthentication) keeps running. A
+   job that cannot be set up warns only when the wrapper relays; a pass-through is then plain ssh.
 
 Arguments reach the real ssh through a command line built with the standard Windows quoting
 rules, every argument quoted: .NET Framework 4.8 has no `ArgumentList`, and Git's ssh (a
@@ -300,7 +304,8 @@ only (no local sudo).
 | Build fails (`Add-Type` blocked, no .NET Framework 4.8, ExecutionPolicy forced by policy) | Toast `cc-askpass: could not build the Windows helper: <reason>`; the mod stays off; Claude's commands behave as without it |
 | The built exe cannot run (AppLocker, WDAC, Defender) | Found by running it once before PATH and `BASH_FUNC_ssh%%` are touched (§5.3 step 2): toast `cc-askpass: could not run the Windows helper: <reason>`, nothing set, no listener; Claude's commands behave as without the mod |
 | Pipe name taken by another process | The listener fails: toast, mod off, the shim taken back off PATH and `BASH_FUNC_ssh%%` unset |
-| Listener ends mid-session | `SSH_ASKPASS` and `CC_ASKPASS_WRAP` unset, the shim taken back off PATH and `BASH_FUNC_ssh%%` unset; a wrapper still reached (the Bash tool's snapshot keeps the function) passes through |
+| Listener ends mid-session | `SSH_ASKPASS` and `CC_ASKPASS_WRAP` unset, the shim taken back off PATH and `BASH_FUNC_ssh%%` unset (or put back to the person's own exported `ssh` function, if one was there); a wrapper still reached (the Bash tool's snapshot keeps the function) passes through |
+| `session.start` again in one load | The old listener and everything it set end first, so its late end cannot take back the new shim |
 | Sessions build the same helper at once | Builds take turns; each ends with a working exe |
 | Pass-through ssh when the wrapper is killed | Ends with it (a job object, as `exec` on Linux), unless it forks (`-f`, `-o ForkAfterAuthentication=yes`) |
 | Askpass cannot reach the pipe (mod disabled) | Message on stderr, exit 1; ssh behaves as without askpass |

@@ -6,6 +6,7 @@ import {
   applyMaskedInput,
   bashShellArgs,
   bashSshFunction,
+  isBashSshFunction,
   claudePidOf,
   clipLines,
   matchBashCommand,
@@ -97,6 +98,9 @@ let sessionDir = ''
 let isWin = false
 // Windows: the build directory, and the listener's pipe, reply token and own image path once it is ready.
 let winOutDir = ''
+// Windows: the person's own exported `ssh` function, put back when ours goes.
+// ponytail: module state, so a hot reload forgets it; keep it in $.state if that matters.
+let inheritedBashSsh: string | undefined
 let winListener = { pipe: '', token: '', exe: '' }
 // Windows requests whose asker went away; the listener says so instead of `kill -0`.
 const goneIds = new Set<number>()
@@ -568,10 +572,13 @@ async function buildHelper($: EngineInterface, root: string): Promise<{ outDir: 
     // Windows PowerShell 5.1, whatever the tools run: its Add-Type is the .NET Framework compiler.
     const systemRoot = (await $.env.get('SystemRoot')) ?? 'C:\\Windows'
     const powershell = `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
-    const build = await $.process.run(
-      [powershell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${root}\\win\\build.ps1`, source, outDir],
-      { timeoutMs: BUILD_TIMEOUT_MS },
-    )
+    // A run that throws (a timeout) is a failed build like any other.
+    const build = await $.process
+      .run(
+        [powershell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${root}\\win\\build.ps1`, source, outDir],
+        { timeoutMs: BUILD_TIMEOUT_MS },
+      )
+      .catch((error: unknown) => ({ exitCode: -1, stderr: String(error) }))
     // A build of the same source by another session starting at once may have finished it.
     if (build.exitCode === 0 || (await $.fs.exists(`${outDir}\\cc-askpass.exe`))) return { outDir }
     // build.ps1 prints one line; PowerShell's own errors put the reason first.
@@ -612,6 +619,9 @@ async function startWindows($: EngineInterface): Promise<boolean> {
     return false
   }
   winOutDir = built.outDir
+  const before = await $.env.get('BASH_FUNC_ssh%%')
+  // An earlier load's function is ours; anything else is the person's and comes back later.
+  inheritedBashSsh = before !== undefined && !isBashSshFunction(before) ? before : undefined
   // Git Bash's profile puts its /usr/bin (and its ssh) before the inherited PATH, so every bash
   // imports this as an `ssh` function instead; the two variables stop it rewriting `/x` arguments
   // into Windows paths.
@@ -624,7 +634,7 @@ async function startWindows($: EngineInterface): Promise<boolean> {
  * tool's snapshot keeps the function, where the wrapper passes through: CC_ASKPASS_WRAP is unset.
  */
 async function removeWinShim($: EngineInterface): Promise<void> {
-  await $.env.set('BASH_FUNC_ssh%%', undefined)
+  await $.env.set('BASH_FUNC_ssh%%', inheritedBashSsh)
   await $.env.set('PATH', withoutShim(await $.env.get('PATH'), `${winOutDir}\\shim`, ';'))
 }
 
@@ -636,6 +646,13 @@ async function dropWinRequests($: EngineInterface): Promise<void> {
   goneIds.clear()
   queue.length = 0
   if (current !== null) await finish($, current)
+}
+
+/** Everything the Windows listener set, and its requests, gone with it. */
+async function endWinListener($: EngineInterface): Promise<void> {
+  await unsetEnv($)
+  await dropWinRequests($)
+  await removeWinShim($)
 }
 
 async function runServe($: EngineInterface): Promise<void> {
@@ -693,11 +710,8 @@ async function runServe($: EngineInterface): Promise<void> {
     if (isWin) await removeWinShim($)
     return
   }
-  await unsetEnv($)
-  if (isWin) {
-    await dropWinRequests($)
-    await removeWinShim($)
-  }
+  if (isWin) await endWinListener($)
+  else await unsetEnv($)
   $.ui.toast(`cc-askpass: the askpass listener stopped; ${isWin ? 'ssh' : 'sudo'} will not ask for passwords here`)
 }
 
@@ -710,6 +724,13 @@ export const register: Register = (on, options) => {
     // Under -p or the SDK nobody can answer a pane: leave sudo to fail at once as before.
     if (!e.isInteractive) return next(e)
     isWin = (await $.env.get('OS')) === 'Windows_NT'
+    // A second start replaces the listener. The old one ends here: ending later, it could take
+    // back the shim this start sets.
+    if (isWin && serveGeneration > 0) {
+      serveGeneration++
+      stopServe()
+      await endWinListener($)
+    }
     // Before the session's shell snapshot, which fixes PATH for every Bash command: a command
     // that changed PATH itself would lose the permission dialog's "don't ask again".
     if (isWin && !(await startWindows($))) return next(e)

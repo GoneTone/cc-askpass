@@ -124,7 +124,9 @@ function Test([string]$name, [scriptblock]$body) {
 # ssh as FAKE_SSH_MODE says: record, silent, relay, sleep (a plain ssh too) or deaf.
 $fakeSource = @'
 using System;
+using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -189,6 +191,14 @@ public static class FakeSsh
         }
         // A plain ssh that keeps running, like a tunnel.
         if (mode == "sleep") Thread.Sleep(Timeout.Infinite);
+        // A plain ssh that leaves one running in the background, like a ControlPersist master.
+        if (mode == "spawn")
+        {
+            ProcessStartInfo background = new ProcessStartInfo(Assembly.GetEntryAssembly().Location, "background");
+            background.UseShellExecute = false;
+            background.EnvironmentVariables["FAKE_SSH_MODE"] = "sleep";
+            Process.Start(background).Dispose();
+        }
         Console.Out.Write("fake-out\n");
         return 7;
     }
@@ -267,6 +277,15 @@ try {
     $run = Wait-Program (Start-Program (Join-Path $dir 'shim\ssh.exe') @('h') @{ PATH = $env:SystemRoot })
     Check ($run.Code -eq 255 -and $run.Err -match 'ssh: command not found') "shim\ssh.exe exited $($run.Code): $($run.Err)"
     Check (@(Get-ChildItem -LiteralPath $dir -Recurse -Filter '*.tmp.exe').Count -eq 0) 'a temporary exe was left'
+  }
+
+  Test "a build removes a killed build's temporary exe" {
+    $dir = Join-Path $tmp 'killed\same'
+    $null = New-Item -ItemType Directory $dir
+    $litter = Join-Path $dir 'cc-askpass.99999.tmp.exe'
+    [IO.File]::WriteAllText($litter, 'half a build')
+    $null = Invoke-Build $dir
+    Check (-not (Test-Path -LiteralPath $litter)) 'the killed build left its temporary exe'
   }
 
   Test 'a build failure reaches stderr as UTF-8' {
@@ -628,6 +647,19 @@ try {
         Check ($left.Count -eq 0) "$($left.Count) fake ssh processes are left for $argv"
       }
     }
+  }
+
+  Test 'a pass-through ssh that ends leaves its background ssh running' {
+    $run = Start-Wrapper @('h') @{ FAKE_SSH_MODE = 'spawn'; CC_ASKPASS_WRAP = $null }
+    Check $run.P.WaitForExit(5000) 'the wrapper did not end'
+    Check ($run.P.ExitCode -eq 7) "the wrapper exited $($run.P.ExitCode): $(Get-Stderr $run)"
+    for ($i = 0; $i -lt 50 -and (Get-Runs $run).Count -lt 2; $i++) { Start-Sleep -Milliseconds 100 }
+    # Long enough for a job closing with the wrapper to have ended it.
+    Start-Sleep -Milliseconds 500
+    $left = @(Get-Process ssh -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $fake })
+    foreach ($process in $left) { $process.Kill(); $null = $process.WaitForExit(5000) }
+    Check ($left.Count -eq 1) "$($left.Count) background ssh processes outlived the wrapper"
+    Check ((Get-Stderr $run) -notmatch 'job object') "a pass-through warned: $(Get-Stderr $run)"
   }
 
   Test 'an R that stops reading cannot hold the wrapper' {
