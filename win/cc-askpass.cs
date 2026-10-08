@@ -237,7 +237,9 @@ static class Pipes
     // Null when the pipe cannot be reached in 5 s (Connect keeps retrying while it does not exist).
     public static NamedPipeClientStream Connect(string name)
     {
-        NamedPipeClientStream pipe = new NamedPipeClientStream(".", name, PipeDirection.InOut);
+        // Identification only: a server squatting on the name cannot act as this user.
+        NamedPipeClientStream pipe = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.None,
+            TokenImpersonationLevel.Identification);
         try
         {
             pipe.Connect(ReachMs);
@@ -263,15 +265,21 @@ static class Pipes
         }
     }
 
-    // Sends one request line and returns the reply line, or null when the listener cannot be reached.
-    // A connection that breaks first (the listener restarting) is made again and the line sent again.
+    // Sends one request line and returns the reply line, or null (the reason on stderr) when no
+    // listener takes it. A connection that breaks first (the listener restarting) is made again and
+    // the line sent again; one that keeps breaking at once is a listener refusing the line.
     public static byte[] Request(string name, byte[] line)
     {
-        while (true)
+        for (int quickBreaks = 0; quickBreaks < 5; )
         {
             using (NamedPipeClientStream pipe = Connect(name))
             {
-                if (pipe == null) return null;
+                if (pipe == null)
+                {
+                    Unreachable();
+                    return null;
+                }
+                Stopwatch connected = Stopwatch.StartNew();
                 try
                 {
                     pipe.Write(line, 0, line.Length);
@@ -281,8 +289,12 @@ static class Pipes
                 catch (IOException)
                 {
                 }
+                quickBreaks = connected.ElapsedMilliseconds < 1000 ? quickBreaks + 1 : 0;
             }
+            Thread.Sleep(200 * quickBreaks);
         }
+        Console.Error.WriteLine("cc-askpass: the cc-askpass listener keeps closing the connection without a reply");
+        return null;
     }
 
     // Tabs and line breaks become spaces; cut to max UTF-8 bytes, never inside a character.
@@ -313,7 +325,7 @@ static class Asker
         field.CopyTo(line, 0);
         line[field.Length] = (byte)'\n';
         byte[] reply = Pipes.Request(name, line);
-        if (reply == null) return Pipes.Unreachable();
+        if (reply == null) return 1;
         if (reply.Length == 0) return 1;
 
         // The password's bytes go out as they came, never decoded.
@@ -365,7 +377,11 @@ static class Listener
             return 1;
         }
         int self = Process.GetCurrentProcess().Id;
-        Native.ParentPids().TryGetValue(self, out claudePid);
+        if (!Native.ParentPids().TryGetValue(self, out claudePid) || claudePid == 0)
+        {
+            Console.Error.WriteLine("cc-askpass: cannot find the listener's parent process");
+            return 1;
+        }
         string name = "cc-askpass-" + session + "-" + claudePid;
         NamedPipeServerStream requests = CreateFirst(name);
         NamedPipeServerStream replies = requests == null ? null : CreateFirst(name + "-reply");
@@ -495,7 +511,7 @@ static class Listener
                 waiting[id] = pipe;
             }
             Print("{\"id\":" + id + "," + described + "}");
-            // The asker sends nothing more: this read ends when it closes, answered or not.
+            // The asker sends nothing more: this read ends when the asker goes or the reply closes it.
             while (pipe.ReadByte() >= 0)
             {
             }
@@ -504,6 +520,9 @@ static class Listener
         {
         }
         catch (ObjectDisposedException)
+        {
+        }
+        catch (OperationCanceledException)
         {
         }
         finally
@@ -538,12 +557,18 @@ static class Listener
             try
             {
                 asker.Write(message, 0, message.Length);
+                // Closed once the asker has read it, so the reply never races the close.
+                asker.WaitForPipeDrain();
             }
             catch (IOException)
             {
             }
             catch (ObjectDisposedException)
             {
+            }
+            finally
+            {
+                asker.Dispose();
             }
         }
         catch (IOException)

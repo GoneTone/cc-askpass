@@ -120,11 +120,25 @@ try {
   Test 'build is idempotent and cleans siblings' {
     $null = Invoke-Build (Join-Path $tmp 'out\a')
     Check (Test-Path -LiteralPath (Join-Path $tmp 'out\a\shim\ssh.exe')) 'no shim\ssh.exe'
+    $null = New-Item -ItemType Directory (Join-Path $tmp 'out\keep\shim')
     $script:exe = Invoke-Build (Join-Path $tmp 'out\b')
     Check (-not (Test-Path -LiteralPath (Join-Path $tmp 'out\a'))) 'the first build directory is still there'
     Check (Test-Path -LiteralPath $exe) 'no cc-askpass.exe in the second build'
+    Check (Test-Path -LiteralPath (Join-Path $tmp 'out\keep\shim')) 'a directory without build files was removed'
     $wrapper = Wait-Program (Start-Program (Join-Path $tmp 'out\b\shim\ssh.exe') @('host'))
     Check ($wrapper.Code -eq 255) "the ssh stub exited $($wrapper.Code)"
+  }
+
+  Test 'a build in use stays until it is free' {
+    $old = Join-Path $tmp 'inuse\old'
+    $oldServe = Start-Program (Invoke-Build $old) @('serve', 'test-inuse')
+    Check ($null -ne (Read-Line $oldServe)) "the old build's listener did not start: $(Get-Stderr $oldServe)"
+    $null = Invoke-Build (Join-Path $tmp 'inuse\new')
+    Check (Test-Path -LiteralPath (Join-Path $old 'shim\ssh.exe')) 'a build in use lost its shim\ssh.exe'
+    $oldServe.P.Kill()
+    $null = $oldServe.P.WaitForExit(5000)
+    $null = Invoke-Build (Join-Path $tmp 'inuse\newer')
+    Check (-not (Test-Path -LiteralPath $old)) 'the old build stayed after its listener ended'
   }
 
   $serve = Start-Serve $session
@@ -230,6 +244,15 @@ try {
     Send-Reply $script:serve $request.id 'again'
     $result = Wait-Program $ask
     Check ($result.Code -eq 0 -and $result.Out -ceq "again`n") "askpass exited $($result.Code) with '$($result.Out)'"
+  }
+
+  Test 'askpass gives up on a listener that keeps closing' {
+    $name = 'test-closer-' + [guid]::NewGuid().ToString('N')
+    $closer = "while (`$true) { `$s = New-Object System.IO.Pipes.NamedPipeServerStream('$name', 'InOut', -1); `$s.WaitForConnection(); `$s.Dispose() }"
+    $null = Start-Program $powershell @('-NoProfile', '-NonInteractive', '-Command', $closer)
+    $result = Wait-Program (Start-Ask 'Password: ' ([pscustomobject]@{ Pipe = $name })) 15000
+    Check ($result.Code -eq 1) "askpass exited $($result.Code)"
+    Check ($result.Err -match 'keeps closing') "stderr is '$($result.Err)'"
   }
 
   Test 'two listeners keep their requests apart' {

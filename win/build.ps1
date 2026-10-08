@@ -16,16 +16,20 @@ try {
   Copy-Item -LiteralPath $tmp -Destination (Join-Path $OutDir 'shim\ssh.exe') -Force
   Move-Item -LiteralPath $tmp -Destination (Join-Path $OutDir 'cc-askpass.exe') -Force
 
-  # Only directories that hold a build: a mistaken <outDir> must not empty its parent.
+  # Only directories that hold build files: a mistaken <outDir> must not empty its parent.
+  $buildFiles = 'cc-askpass.exe', 'shim\ssh.exe', 'cc-askpass.tmp.exe'
   Get-ChildItem -LiteralPath (Split-Path -Parent $OutDir) -Directory |
     Where-Object {
-      $_.FullName -ne $OutDir -and ((Test-Path -LiteralPath (Join-Path $_.FullName 'shim')) -or
-        (Test-Path -LiteralPath (Join-Path $_.FullName 'cc-askpass.exe')))
+      $dir = $_.FullName
+      $dir -ne $OutDir -and ($buildFiles | Where-Object { Test-Path -LiteralPath (Join-Path $dir $_) })
     } |
-    ForEach-Object {
-      # Files a running helper still holds stay; the next build tries again.
-      Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-    }
+    Where-Object {
+      # A build another session still runs stays whole: its shim\ssh.exe goes with its listener.
+      -not (Get-ChildItem -LiteralPath $_.FullName -Recurse -File | Where-Object {
+        try { [IO.File]::Open($_.FullName, 'Open', 'ReadWrite', 'None').Dispose(); $false } catch { $true }
+      })
+    } |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
   exit 0
 } catch {
   [Console]::Error.WriteLine('cc-askpass: build failed: ' + ($_.Exception.Message -replace '\s+', ' '))
