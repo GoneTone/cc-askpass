@@ -1,6 +1,6 @@
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Requester } from './core'
+import { askedByLine, type AskSource, type Requester } from './core'
 import {
   AnsweredPids,
   applyMaskedInput,
@@ -10,7 +10,6 @@ import {
   matchBashCommand,
   parsePsTable,
   isOurHelper,
-  isTrustedClient,
   parseExeInfo,
   parseHelperPs,
   parseParentPs,
@@ -18,7 +17,6 @@ import {
   parseRequest,
   promptLabel,
   relayHost,
-  relayWrapperHost,
   remoteLabel,
   stripControl,
   withShim,
@@ -45,6 +43,9 @@ const REMOTE_NOTE =
 // can pose as a relay, so the person is the last check.
 const REMOTE_WARNING =
   'A remote prompt can be raised by any program running as you. Answer only if you expected this command to need a password on this host.'
+// Shown in red under `Asked by:` when the request did not come through our helper.
+const UNVERIFIED_WARNING =
+  "This request did not come through cc-askpass's helper. Answer only if you know which program is asking."
 // Characters of a remote host chain the heading shows; the verified host at its end always stays.
 const MAX_LABEL_LENGTH = 120
 // Characters of a remote program's name the heading shows.
@@ -64,7 +65,7 @@ const MAX_SECTION_ROWS = 3
 const REPLY_SCRIPT = '[ -p "$1" ] || exit 1; exec 3<>"$1"; [ -p /dev/fd/3 ] || { rm -f "$1"; exit 1; }; cat >&3'
 
 type Request = {
-  helperPid: number
+  id: number
   prompt: string
   requester: Requester
   isRetry: boolean
@@ -121,7 +122,7 @@ function onRequestLine($: EngineInterface, line: string): void {
   })
 }
 
-/** Checks with `ps` that the request comes from our helper, and that its caller may ask. */
+/** Works out who asks with `ps` and queues the request; no caller is refused, the person decides. */
 async function verify($: EngineInterface, line: string): Promise<void> {
   const parsed = parseRequest(line)
   if (parsed === null) return log($, `ignored malformed request line: ${line}`)
@@ -129,34 +130,37 @@ async function verify($: EngineInterface, line: string): Promise<void> {
   const helperPs = await $.process.run(['ps', '-ww', '-o', 'ppid=,args=', '-p', String(parsed.helperPid)])
   const helper = parseHelperPs(helperPs.stdout)
   if (helper === null) return
+  const id = parsed.helperPid
+  let requester: Requester
   if (!isOurHelper(helper.args, askpassPath)) {
-    $.ui.toast(`Rejected forged askpass request (pid ${parsed.helperPid})`)
-    return log($, `rejected forged request from pid ${parsed.helperPid}: ${helper.args}`)
+    log($, `request from pid ${id} did not come through our helper: ${helper.args}`)
+    requester = {
+      pid: id,
+      isSudo: false,
+      comm: 'unknown program',
+      command: stripControl(helper.args),
+      askedBy: { kind: 'unverified', exe: null },
+    }
+  } else {
+    const parentPs = await $.process.run(['ps', '-ww', '-o', 'user=,comm=,args=', '-p', String(helper.ppid)])
+    const parent = parseParentPs(parentPs.stdout, helper.ppid)
+    if (parent === null) return
+    requester = { ...parent, askedBy: await programOf($, parent) }
   }
+  const request: Request = { id, prompt: parsed.prompt, requester, isRetry: false, claudeCommand: null }
 
-  const parentPs = await $.process.run(['ps', '-ww', '-o', 'user=,comm=,args=', '-p', String(helper.ppid)])
-  const requester = parseParentPs(parentPs.stdout, helper.ppid)
-  if (requester === null) return
-  const request: Request = { helperPid: parsed.helperPid, prompt: parsed.prompt, requester, isRetry: false, claudeCommand: null }
-
-  if (!requester.isSudo) {
-    const host = relayHost(requester.command, `${$.plugin.root}/bin/shim/ssh`)
-    const isGenuine = host === null ? await isTrustedCaller($, requester) : await isWrapperRelay($, requester.pid, host)
-    // With remote prompts off no relay is taken, whoever started it.
-    if (!isGenuine || (host !== null && !isRemoteOn)) {
-      // The helper is ours: an empty answer makes it fail at once instead of waiting.
-      $.ui.toast(`Rejected askpass request from ${requester.comm} (pid ${requester.pid})`)
-      log($, isGenuine ? 'rejected a remote request: remoteHosts is off' : `rejected request from untrusted caller: ${requester.command}`)
-      return reply($, request.helperPid, '')
+  if (requester.askedBy.kind === 'relay') {
+    // With remote prompts off no relay is taken: the helper is ours, so an empty answer makes it fail at once.
+    if (!isRemoteOn) {
+      log($, 'rejected a remote request: remoteHosts is off')
+      return reply($, request.id, '')
     }
-    if (host !== null) {
-      // Everything but the host is remote text: it may not drive the terminal.
-      const clean = (text: string | null) => (text === null ? null : stripControl(text) || null)
-      // The wrapper writes host names only: any other chain is dropped, not shown.
-      const via = parsed.via !== null && VIA_PATTERN.test(parsed.via) ? parsed.via : null
-      requester.remote = { host, via, reported: clean(parsed.reported) }
-      request.prompt = stripControl(parsed.prompt)
-    }
+    // Everything but the host is remote text: it may not drive the terminal.
+    const clean = (text: string | null) => (text === null ? null : stripControl(text) || null)
+    // The wrapper writes host names only: any other chain is dropped, not shown.
+    const via = parsed.via !== null && VIA_PATTERN.test(parsed.via) ? parsed.via : null
+    requester.remote = { host: requester.askedBy.host, via, reported: clean(parsed.reported) }
+    request.prompt = stripControl(parsed.prompt)
   }
 
   const claudeCommand = await findClaudeCommand($, requester)
@@ -170,21 +174,14 @@ async function verify($: EngineInterface, line: string): Promise<void> {
   void showNext($).catch(error => log($, `could not show the request: ${String(error)}`))
 }
 
-/** Whether a non-sudo caller is a real ssh/git binary (see `isTrustedClient`). */
-async function isTrustedCaller($: EngineInterface, requester: Requester): Promise<boolean> {
-  // `<owner uid> <path>` of the caller's executable (bin/exe-of).
-  const exe = await $.process.run(['sh', `${$.plugin.root}/bin/exe-of`, String(requester.pid)])
-  return isTrustedClient(requester, exe.exitCode === 0 ? parseExeInfo(exe.stdout) : null)
-}
-
-/**
- * Whether relay `relayPid` was started by our ssh wrapper running in normal mode for `host`:
- * a `--relay` started by hand, or by a wrapper connected elsewhere, does not pass. The host
- * comes from the command line Claude's command ran, never from the remote side.
- */
-async function isWrapperRelay($: EngineInterface, relayPid: number, host: string): Promise<boolean> {
-  const ps = await $.process.run(['ps', '-e', '-ww', '-o', 'pid=,ppid=,args='])
-  return relayWrapperHost(parsePsTable(ps.stdout), relayPid, `${$.plugin.root}/bin/shim/ssh`) === host
+/** What the helper's parent is: our ssh wrapper's relay, or a program named by its executable. */
+async function programOf($: EngineInterface, parent: Omit<Requester, 'askedBy'>): Promise<AskSource> {
+  const host = relayHost(parent.command, `${$.plugin.root}/bin/shim/ssh`)
+  if (host !== null) return { kind: 'relay', host, realSsh: null }
+  // `<owner uid> <path>` of the parent's executable (bin/exe-of).
+  const exe = await $.process.run(['sh', `${$.plugin.root}/bin/exe-of`, String(parent.pid)])
+  const path = exe.exitCode === 0 ? parseExeInfo(exe.stdout)?.path : undefined
+  return { kind: 'program', exe: stripControl(path ?? (parent.isSudo ? 'sudo (root)' : parent.comm)) }
 }
 
 /** The Bash command Claude ran that led to `requester`, if one of the recent ones matches. */
@@ -209,7 +206,7 @@ async function isAlive($: EngineInterface, pid: number): Promise<boolean> {
 
 /** A relayed request also ends with its relay: nothing is left to carry the answer back. */
 async function isRequestAlive($: EngineInterface, request: Request): Promise<boolean> {
-  if (!(await isAlive($, request.helperPid))) return false
+  if (!(await isAlive($, request.id))) return false
   return request.requester.remote === undefined || isAlive($, request.requester.pid)
 }
 
@@ -265,6 +262,14 @@ function focusWarning(isMain: boolean): string {
   return `${how} before typing — your keys are going to the prompt below.`
 }
 
+function askedByText(requester: Requester): string {
+  return `Asked by: ${askedByLine(requester.askedBy)}`
+}
+
+function isUnverified(requester: Requester): boolean {
+  return requester.askedBy.kind === 'unverified'
+}
+
 function claudeLine(request: Request): string | null {
   // A remote pane always has the line: what Claude Code recorded is the one thing no process
   // can change, and "(unknown)" says nothing vouches for the request.
@@ -294,6 +299,8 @@ function paneRows(request: Request): number {
   const remote = request.requester.remote === undefined ? 0 : 1 + wrappedLines(REMOTE_WARNING, PANE_WIDTH)
   const header =
     wrappedLines(paneHeading(request.requester), PANE_WIDTH) +
+    wrappedLines(askedByText(request.requester), PANE_WIDTH) +
+    (isUnverified(request.requester) ? wrappedLines(UNVERIFIED_WARNING, PANE_WIDTH) : 0) +
     remote +
     (claude === null ? 0 : wrappedLines(claude, PANE_WIDTH)) +
     wrappedLines(commandLine(request), PANE_WIDTH)
@@ -387,21 +394,21 @@ async function finish($: EngineInterface, request: Request): Promise<void> {
   await showNext($)
 }
 
-async function reply($: EngineInterface, helperPid: number, password: string): Promise<void> {
+async function reply($: EngineInterface, id: number, password: string): Promise<void> {
   try {
-    await $.process.run(['sh', '-c', REPLY_SCRIPT, '_', `${sessionDir}/reply.${helperPid}`], {
+    await $.process.run(['sh', '-c', REPLY_SCRIPT, '_', `${sessionDir}/reply.${id}`], {
       stdin: `${password}\n`,
       timeoutMs: REPLY_TIMEOUT_MS,
     })
   } catch (error) {
-    log($, `reply to pid ${helperPid} failed: ${String(error)}`)
+    log($, `reply to pid ${id} failed: ${String(error)}`)
   }
 }
 
 async function submit($: EngineInterface, request: Request, password: string): Promise<void> {
   if (current !== request || request.isAnswered) return
   request.isAnswered = true
-  await reply($, request.helperPid, password)
+  await reply($, request.id, password)
   const key = retryKey(request)
   if (key !== null) answered.mark(key, await $.clock.now())
   await finish($, request)
@@ -595,7 +602,7 @@ export const register: Register = (on, options) => {
     const { Input } = elements
 
     // A fresh key per request and per load: an Input keeps its old text when a key is reused.
-    const key = `password-${request.helperPid}-${LOAD_ID}`
+    const key = `password-${request.id}-${LOAD_ID}`
     const warning = e.props.isFocused ? null : focusWarning(isMainScreen(e))
     const claude = claudeLine(request)
     const isRemote = request.requester.remote !== undefined
@@ -610,6 +617,14 @@ export const register: Register = (on, options) => {
         <Text bold wrap="wrap">
           {paneHeading(request.requester)}
         </Text>
+        <Text dimColor wrap="wrap">
+          {askedByText(request.requester)}
+        </Text>
+        {isUnverified(request.requester) && (
+          <Text color="red" wrap="wrap">
+            {UNVERIFIED_WARNING}
+          </Text>
+        )}
         {isRemote && <Text dimColor>remote</Text>}
         {claude !== null && (
           <Text dimColor wrap="wrap">

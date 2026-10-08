@@ -15,6 +15,8 @@ const PANE_PROPS = {
 const REPLY_SCRIPT = '[ -p "$1" ] || exit 1; exec 3<>"$1"; [ -p /dev/fd/3 ] || { rm -f "$1"; exit 1; }; cat >&3'
 const SUDO_PROMPT = '[sudo] password for alice: '
 const SUDO_PARENT = 'root     sudo            sudo apt update'
+const UNVERIFIED_WARNING =
+  "This request did not come through cc-askpass's helper. Answer only if you know which program is asking."
 const PASSWORD = '  p@ss \\w$rd é '
 
 
@@ -70,42 +72,42 @@ async function world($: any, on: any) {
       psTable = [`${sudoPid} 950 sudo`, `950 900 /bin/bash -c source /x && eval '${quoted}' < /dev/null`, '900 1 claude'].join('\n')
     },
     /**
-     * Helper `helperPid` asks through the relay (pid 4100) of the ssh wrapper (pid 3900),
+     * Helper `id` asks through the relay (pid 4100) of the ssh wrapper (pid 3900),
      * which runs `<shim> <wrapperArgs>`; the relay's args are `<sh> <relayArgs>`.
      */
     async relayRequest(
-      helperPid: number,
+      id: number,
       line: { prompt: string; via?: string; reported?: string },
       options: { relayArgs?: string; wrapperArgs?: string } = {},
     ) {
       const relayArgs = `/bin/sh ${options.relayArgs ?? `${shim} --relay server`}`
-      ps.set(`helper:${helperPid}`, `4100 /bin/sh ${askpass} ${line.prompt}`)
+      ps.set(`helper:${id}`, `4100 /bin/sh ${askpass} ${line.prompt}`)
       ps.set('parent:4100', `alice ssh ${relayArgs}`)
       // The relay is a script: its executable is the shell.
       exes.set('4100', '0 /usr/bin/dash')
-      alive.add(helperPid)
+      alive.add(id)
       alive.add(4100)
       // The Bash tool's shell from `bashCall`, or one that ran something else.
       const shell = psTable.split('\n').filter(row => row.startsWith('950 '))
       const rows = [...(shell.length > 0 ? shell : ['950 900 /bin/bash -c x']), '900 1 claude']
       psTable = [`4100 3900 ${relayArgs}`, `3900 950 /bin/sh ${shim} ${options.wrapperArgs ?? 'server sudo apt update'}`, ...rows].join('\n')
-      serve.emit(`${helperPid}\t${line.prompt}\t${line.via ?? ''}\t${line.reported ?? ''}\n`)
+      serve.emit(`${id}\t${line.prompt}\t${line.via ?? ''}\t${line.reported ?? ''}\n`)
       await clock.settle()
     },
     /**
-     * Sets up helper `helperPid`, child of `parentPid`, asking with `prompt`; `exe` is the
-     * parent's `<owner uid> <executable>` (a root-owned /usr/bin/<comm> by default).
+     * Sets up helper `id`, child of `parentPid`, asking with `prompt`; `exe` is the
+     * parent's `<owner uid> <executable>` (a root-owned /usr/bin/<comm> by default; null: unknown).
      */
-    stage(helperPid: number, parentPid: number, prompt: string, parentPs: string, options: { helperArgs?: string; exe?: string } = {}) {
-      ps.set(`helper:${helperPid}`, `${parentPid} ${options.helperArgs ?? `/bin/sh ${askpass} ${prompt}`}`)
+    stage(id: number, parentPid: number, prompt: string, parentPs: string, options: { helperArgs?: string; exe?: string | null } = {}) {
+      ps.set(`helper:${id}`, `${parentPid} ${options.helperArgs ?? `/bin/sh ${askpass} ${prompt}`}`)
       ps.set(`parent:${parentPid}`, parentPs)
-      exes.set(String(parentPid), options.exe ?? `0 /usr/bin/${parentPs.split(/\s+/)[1]}`)
-      alive.add(helperPid)
-      return `${helperPid}\t${prompt}\n`
+      if (options.exe !== null) exes.set(String(parentPid), options.exe ?? `0 /usr/bin/${parentPs.split(/\s+/)[1]}`)
+      alive.add(id)
+      return `${id}\t${prompt}\n`
     },
     /** A helper asks (see `stage`) and the mod has handled the request. */
-    async request(helperPid: number, parentPid: number, prompt: string, parentPs: string, options: { helperArgs?: string; exe?: string } = {}) {
-      serve.emit(this.stage(helperPid, parentPid, prompt, parentPs, options))
+    async request(id: number, parentPid: number, prompt: string, parentPs: string, options: { helperArgs?: string; exe?: string | null } = {}) {
+      serve.emit(this.stage(id, parentPid, prompt, parentPs, options))
       await clock.settle()
     },
     emit(text: string) {
@@ -156,13 +158,13 @@ for (const surface of SURFACES) {
   test(`sudo request opens titled pane (${surface})`, async ($, on) => {
     const w = await world($, on)
     await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
-    // rows: warning 2 + heading 1 + `$` 1 + prompt 1 + field 1 + Cancel 1 + 2 blank lines.
+    // rows: warning 2 + heading 1 + Asked by 1 + `$` 1 + prompt 1 + field 1 + Cancel 1 + 2 blank lines.
     expect(w.rec.opens.at(-1)).toEqual({
       id: 'askpass',
       title: 'sudo password',
       focus: true,
       closeOnEscape: true,
-      rows: 9,
+      rows: 10,
       columns: 60,
     })
     const ui = await w.mount(surface)
@@ -330,8 +332,8 @@ test('asks for the rows its content needs', async ($, on) => {
   const w = await world($, on)
   await w.bashCall('sudo -k && ./install.sh', 4100)
   await w.request(4242, 4100, SUDO_PROMPT, `root sudo sudo cp ${'x'.repeat(400)} /opt`)
-  // 9 for a plain request, plus the Claude line (1) and two more rows of the clipped `$` line.
-  expect(w.rec.opens.at(-1)?.rows).toBe(12)
+  // 10 for a plain request, plus the Claude line (1) and two more rows of the clipped `$` line.
+  expect(w.rec.opens.at(-1)?.rows).toBe(13)
 })
 
 test('asks ps for whole command lines', async ($, on) => {
@@ -351,12 +353,17 @@ test('a pane already open redraws when a request arrives', async ($, on) => {
   expect(await ui.find({ text: /sudo needs your password/ })).toBeDefined()
 })
 
-test('forged request is rejected', async ($, on) => {
+test('a request not from our helper shows as unverified', async ($, on) => {
   const w = await world($, on)
   await w.request(6666, 6000, SUDO_PROMPT, SUDO_PARENT, { helperArgs: '/bin/sh /tmp/evil.sh x' })
-  expect(w.rec.opens).toEqual([])
-  expect(w.replies()).toEqual([])
-  expect(w.rec.toasts.filter(text => text.includes('Rejected forged askpass request'))).toHaveLength(1)
+  expect(w.rec.opens).toHaveLength(1)
+  const ui = await w.mount('terminal')
+  expect((await ui.find({ type: 'Text', text: /^Asked by:/ }))?.text).toBe('Asked by: unknown program (unverified)')
+  expect(await ui.find({ type: 'Text', text: UNVERIFIED_WARNING })).toBeDefined()
+  expect(w.rec.toasts.filter(text => text.includes('Rejected'))).toEqual([])
+  await ui.input({ key: await passwordKey(ui), text: 'x' })
+  await w.clock.settle()
+  expect(w.replies().map(reply => reply.argv.at(-1))).toEqual([`${SESSION_DIR}/reply.6666`])
 })
 
 test('a failing ps check toasts and answers empty', async ($, on) => {
@@ -378,19 +385,31 @@ test('a failing pane open keeps the request for /askpass', async ($, on) => {
   expect(await (await w.mount('terminal')).find({ text: /sudo needs your password/ })).toBeDefined()
 })
 
-test('rejects askpass run straight from a shell', async ($, on) => {
+test('askpass run from a shell shows the shell', async ($, on) => {
   const w = await world($, on)
-  await w.request(7000, 6900, SUDO_PROMPT, 'alice bash bash -c x')
-  expect(w.rec.opens).toEqual([])
-  expect(w.rec.toasts.filter(text => text.includes('Rejected askpass request from bash'))).toHaveLength(1)
-  expect(w.replies().map(reply => reply.stdin)).toEqual(['\n'])
+  await w.request(7000, 6900, SUDO_PROMPT, 'alice bash bash -c x', { exe: '1000 /usr/bin/bash' })
+  expect(w.rec.opens).toHaveLength(1)
+  expect((await (await w.mount('terminal')).find({ text: /^Asked by:/ }))?.text).toBe('Asked by: /usr/bin/bash')
 })
 
-test('rejects a client binary not owned by root', async ($, on) => {
+test('a user-owned client shows its path', async ($, on) => {
   const w = await world($, on)
   await w.request(7000, 6900, 'Enter passphrase for key: ', 'alice ssh ssh -T host', { exe: '1000 /tmp/ssh' })
-  expect(w.rec.opens).toEqual([])
-  expect(w.rec.toasts.filter(text => text.includes('Rejected askpass request from ssh'))).toHaveLength(1)
+  expect(w.rec.opens).toHaveLength(1)
+  expect((await (await w.mount('terminal')).find({ text: /^Asked by:/ }))?.text).toBe('Asked by: /tmp/ssh')
+})
+
+test('sudo shows its executable', async ($, on) => {
+  const w = await world($, on)
+  await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+  const ui = await w.mount('terminal')
+  expect((await ui.find({ text: /^Asked by:/ }))?.text).toBe('Asked by: /usr/bin/sudo')
+  expect(await ui.find({ text: UNVERIFIED_WARNING })).toBeUndefined()
+  await ui.press({ key: 'cancel' })
+  await w.clock.settle()
+  await ui.unmount()
+  await w.request(4243, 4101, SUDO_PROMPT, SUDO_PARENT, { exe: null })
+  expect((await (await w.mount('terminal')).find({ text: /^Asked by:/ }))?.text).toBe('Asked by: sudo (root)')
 })
 
 test('two requests in one chunk open one pane at a time', async ($, on) => {
@@ -594,6 +613,7 @@ test('accepts a request relayed by the ssh wrapper', async ($, on) => {
   await w.relayRequest(4242, { prompt: BOB_PROMPT, via: 'server', reported: 'sudo apt update' })
   expect(w.rec.opens).toHaveLength(1)
   const ui = await w.mount('terminal')
+  expect((await ui.find({ text: /^Asked by:/ }))?.text).toBe('Asked by: cc-askpass ssh wrapper → server')
   expect((await ui.find({ type: 'Text', text: /needs/ }))?.text).toBe('sudo on server needs your password')
   expect(await ui.find({ type: 'Text', text: /^remote$/ })).toBeDefined()
   expect((await ui.find({ type: 'Text', text: /^\$ / }))?.text).toBe('$ sudo apt update (reported by server)')
@@ -648,21 +668,21 @@ test('a remote username prompt is shown in clear, unless sudo reported it', asyn
   expect((await ui.find({ key: await passwordKey(ui) }))?.props.value).toBe('•')
 })
 
-test('rejects a relay with a forged wrapper path', async ($, on) => {
+test('a relay script outside the plugin shows as a program', async ($, on) => {
   const w = await world($, on)
   await w.relayRequest(4242, { prompt: BOB_PROMPT, via: 'server' }, { relayArgs: '/tmp/x/bin/shim/ssh --relay server' })
-  expect(w.rec.opens).toEqual([])
-  expect(w.rec.toasts.filter(text => text.includes('Rejected askpass request'))).toHaveLength(1)
-  expect(w.replies().map(reply => reply.stdin)).toEqual(['\n'])
+  expect(w.rec.opens).toHaveLength(1)
+  const ui = await w.mount('terminal')
+  expect((await ui.find({ text: /^Asked by:/ }))?.text).toBe('Asked by: /usr/bin/dash')
+  expect(await ui.find({ type: 'Text', text: /^remote$/ })).toBeUndefined()
 })
 
 for (const wrapperArgs of ['other sudo apt update', '-p 22 evil server', '--relay server']) {
-  test(`rejects a relay whose parent is not the wrapper for its host (${wrapperArgs})`, async ($, on) => {
+  test(`a relay is labelled by its own host argument (${wrapperArgs})`, async ($, on) => {
     const w = await world($, on)
     await w.relayRequest(4242, { prompt: BOB_PROMPT, via: 'server' }, { wrapperArgs })
-    expect(w.rec.opens).toEqual([])
-    expect(w.rec.toasts.filter(text => text.includes('Rejected askpass request'))).toHaveLength(1)
-    expect(w.replies().map(reply => reply.stdin)).toEqual(['\n'])
+    expect(w.rec.opens).toHaveLength(1)
+    expect((await (await w.mount('terminal')).find({ text: /^Asked by:/ }))?.text).toBe('Asked by: cc-askpass ssh wrapper → server')
   })
 }
 
@@ -714,9 +734,8 @@ test('rejects relayed requests with remoteHosts off', { options: { remoteHosts: 
   const w = await world($, on)
   await w.relayRequest(4242, { prompt: BOB_PROMPT, via: 'server', reported: 'sudo true' })
   expect(w.rec.opens).toEqual([])
-  expect(w.rec.toasts.filter(text => text.includes('Rejected askpass request'))).toHaveLength(1)
   expect(w.replies().map(reply => reply.stdin)).toEqual(['\n'])
-  // A genuine relay: the log says why, not that the caller is untrusted.
+  expect(w.rec.toasts).toEqual([])
   expect(w.rec.logs).toContain('cc-askpass: rejected a remote request: remoteHosts is off')
 })
 

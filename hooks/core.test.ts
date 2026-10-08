@@ -3,24 +3,21 @@ import { expect, test } from 'claude-code/testing'
 import {
   AnsweredPids,
   applyMaskedInput,
+  askedByLine,
   bashShellArgs,
   claudePidOf,
   clipLines,
   matchBashCommand,
   parsePsTable,
   isOurHelper,
-  isTrustedClient,
-  parseExeInfo,
   parseHelperPs,
   parseParentPs,
   parseReady,
   parseRequest,
   relayHost,
-  relayWrapperHost,
   withShim,
   remoteLabel,
   stripControl,
-  wrapperTarget,
   promptLabel,
   wrappedLines,
   shouldMask,
@@ -80,46 +77,13 @@ test('remoteLabel ends with the verified host', () => {
   expect(remoteLabel('server', 'db01 via server')).toBe('db01 via server')
 })
 
-test('wrapperTarget reads the host the way the wrapper names it', () => {
-  const shim = '/opt/p q/bin/shim/ssh'
-  expect(wrapperTarget(`/bin/sh ${shim} server sudo apt update`, shim)).toBe('server')
-  expect(wrapperTarget(`/bin/sh ${shim} -p 22 -i k -o BatchMode=yes alice@server sudo x`, shim)).toBe('server')
-  expect(wrapperTarget(`/bin/sh ${shim} -tp22 -J jump server sudo x`, shim)).toBe('server')
-  expect(wrapperTarget(`/bin/sh ${shim} -t -- ssh://alice@server:2222 sudo x`, shim)).toBe('server')
-  expect(wrapperTarget(`/bin/sh ${shim} server:22 x`, shim)).toBe('server')
-  expect(wrapperTarget(`/bin/sh ${shim} fe80::1 x`, shim)).toBe('fe80::1')
-  expect(wrapperTarget(`/usr/bin/dash ${shim} -lalice server x`, shim)).toBe('server')
-  // Only a shell runs the wrapper: other programs can carry its path and a host as arguments.
-  expect(wrapperTarget(`${shim} server x`, shim)).toBe(null)
-  expect(wrapperTarget(`find ${shim} server -exec /bin/sh ${shim} --relay server ;`, shim)).toBe(null)
-  expect(wrapperTarget(`/usr/bin/python3 ${shim} server x`, shim)).toBe(null)
-  // An option's value is not the host.
-  expect(wrapperTarget(`/bin/sh ${shim} -p server`, shim)).toBe(null)
-  expect(wrapperTarget(`/bin/sh ${shim} --relay server`, shim)).toBe(null)
-  expect(wrapperTarget(`/bin/sh ${shim} -Z server x`, shim)).toBe(null)
-  expect(wrapperTarget(`/bin/sh /tmp/x/bin/shim/ssh server x`, shim)).toBe(null)
-  expect(wrapperTarget(`/bin/sh ${shim}`, shim)).toBe(null)
-  // Crafted to look like another host: words of the remote command do not count.
-  expect(wrapperTarget(`/bin/sh ${shim} evil ssh server`, shim)).toBe('evil')
-})
-
-test('relayWrapperHost takes only the relay immediate parent, run by the same shell', () => {
-  const shim = '/p/bin/shim/ssh'
-  const host = (rows: string[]) => relayWrapperHost(parsePsTable(rows.join('\n')), 4100, shim)
-  expect(host([`4100 3900 /bin/sh ${shim} --relay server`, `3900 950 /bin/sh ${shim} server x`])).toBe('server')
-  // A relay started by a program the genuine relay ran: nothing in between is skipped.
-  expect(
-    host([
-      `4100 4099 /bin/sh ${shim} --relay server`,
-      `4099 3900 /bin/sh ${shim} --relay server`,
-      `3900 950 /bin/sh ${shim} server x`,
-    ]),
-  ).toBe(null)
-  // `find <shim> server -exec /bin/sh <shim> --relay server ;` starts a real relay.
-  expect(host([`4100 3900 /bin/sh ${shim} --relay server`, `3900 950 find ${shim} server -exec /bin/sh ${shim} --relay server ;`])).toBe(null)
-  expect(host([`4100 3900 /bin/sh ${shim} --relay server`, `3900 950 /bin/bash ${shim} server x`])).toBe(null)
-  expect(host([`4100 3900 /bin/sh ${shim} --relay server`])).toBe(null)
-  expect(host([])).toBe(null)
+test('askedByLine names the program, the wrapper or an unverified caller', () => {
+  expect(askedByLine({ kind: 'program', exe: '/usr/bin/sudo' })).toBe('/usr/bin/sudo')
+  expect(askedByLine({ kind: 'relay', host: 'server', realSsh: null })).toBe('cc-askpass ssh wrapper → server')
+  expect(askedByLine({ kind: 'relay', host: 'server', realSsh: 'C:\\Windows\\System32\\OpenSSH\\ssh.exe' }))
+    .toBe('cc-askpass ssh wrapper → server (C:\\Windows\\System32\\OpenSSH\\ssh.exe)')
+  expect(askedByLine({ kind: 'unverified', exe: null })).toBe('unknown program (unverified)')
+  expect(askedByLine({ kind: 'unverified', exe: 'C:\\x\\evil.exe' })).toBe('C:\\x\\evil.exe (unverified)')
 })
 
 test('stripControl drops C0 and C1 controls, escape included', () => {
@@ -159,25 +123,6 @@ test('isOurHelper rejects the path smuggled in through a prompt', () => {
   expect(isOurHelper('/bin/sh /tmp/evil  /opt/p/bin/askpass ', '/opt/p/bin/askpass')).toBe(false)
   expect(isOurHelper('cat /opt/p/bin/askpass', '/opt/p/bin/askpass')).toBe(true)
   expect(isOurHelper('/opt/p/bin/askpass [sudo] password: ', '/opt/p/bin/askpass')).toBe(true)
-})
-
-test('isTrustedClient accepts root-owned ssh and git binaries only', () => {
-  const ssh = { pid: 1, isSudo: false, comm: 'ssh', command: 'ssh host' }
-  expect(isTrustedClient(ssh, parseExeInfo('0 /usr/bin/ssh\n'))).toBe(true)
-  expect(isTrustedClient(ssh, parseExeInfo('1000 /tmp/ssh\n'))).toBe(false)
-  expect(isTrustedClient(ssh, parseExeInfo('0 /usr/bin/dash\n'))).toBe(false)
-  expect(isTrustedClient(ssh, null)).toBe(false)
-  const remote = { pid: 1, isSudo: false, comm: 'git-remote-http', command: 'git-remote-https origin' }
-  expect(isTrustedClient(remote, parseExeInfo('0 /usr/lib/git-core/git-remote-https\n'))).toBe(true)
-  // macOS does not cut comm at 15 characters.
-  const macRemote = { ...remote, comm: 'git-remote-https' }
-  expect(isTrustedClient(macRemote, parseExeInfo('0 /Library/Developer/CommandLineTools/usr/libexec/git-core/git-remote-https\n'))).toBe(true)
-  expect(isTrustedClient({ ...remote, comm: 'sshd' }, parseExeInfo('0 /usr/sbin/sshd\n'))).toBe(false)
-  // `git credential fill` prints what it is told to stdout, where Claude reads it.
-  const git = { pid: 1, isSudo: false, comm: 'git', command: 'git credential fill' }
-  expect(isTrustedClient(git, parseExeInfo('0 /usr/bin/git\n'))).toBe(false)
-  const bash = { pid: 1, isSudo: false, comm: 'bash', command: 'bash -c x' }
-  expect(isTrustedClient(bash, parseExeInfo('0 /usr/bin/bash\n'))).toBe(false)
 })
 
 test('applyMaskedInput takes typed characters as replacing the bullets around them', () => {

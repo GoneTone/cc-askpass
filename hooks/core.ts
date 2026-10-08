@@ -4,14 +4,28 @@ const ANSWERED_TTL_MS = 10 * 60 * 1000
 // Whole command lines are shown; this only stops a pathological argv from flooding the pane.
 const MAX_COMMAND_LENGTH = 2000
 
+/** Who a request says asked: shown to the person, never used to refuse it. */
+export type AskSource =
+  | { kind: 'program'; exe: string }
+  | { kind: 'relay'; host: string; realSsh: string | null }
+  | { kind: 'unverified'; exe: string | null }
+
 export type Requester = {
   pid: number
   isSudo: boolean
   comm: string
   command: string
+  askedBy: AskSource
   // Set for a request relayed by our ssh wrapper: `host` from the wrapper's own args, the rest
   // as the remote side reported it, control characters removed.
   remote?: { host: string; via: string | null; reported: string | null }
+}
+
+/** The `Asked by:` text for a source. */
+export function askedByLine(source: AskSource): string {
+  if (source.kind === 'program') return source.exe
+  if (source.kind === 'relay') return `cc-askpass ssh wrapper → ${source.host}${source.realSsh === null ? '' : ` (${source.realSsh})`}`
+  return `${source.exe ?? 'unknown program'} (unverified)`
 }
 
 const firstLine = (out: string): string => out.split('\n')[0] ?? ''
@@ -68,66 +82,6 @@ export function withShim(path: string | undefined, dir: string): string | null {
   return path.split(':').includes(dir) ? null : `${dir}:${path}`
 }
 
-// ssh's options as getopts takes them (a colon after a letter that takes a value).
-const SSH_OPTIONS = '1246ab:c:e:fgi:kl:m:no:p:qstvxAB:CD:E:F:GI:J:KL:MNO:P:Q:R:S:TVw:W:XYy'
-
-// Shells a `#!/bin/sh` script can run under, by basename (busybox runs sh as itself).
-const SHELLS = ['sh', 'dash', 'bash', 'zsh', 'ksh', 'ash', 'busybox']
-
-/**
- * The host a process running our ssh wrapper in normal mode (`<shell> <shimPath> <ssh args>`)
- * connects to, named the way the wrapper names it (no `ssh://`, `user@` or `:port`). Only a
- * shell counts as the interpreter: `find <shimPath> server -exec …` is not the wrapper.
- * ps joins the arguments with spaces, so they are split on whitespace: an option value with
- * a space in it (`-o "ProxyCommand ssh -W %h:%p jump"`) misreads, and the request is refused.
- */
-export function wrapperTarget(args: string, shimPath: string): string | null {
-  const interpreter = args.slice(0, args.indexOf(' '))
-  const command = args.slice(interpreter.length + 1)
-  if (!SHELLS.includes(interpreter.split('/').at(-1) ?? '') || !command.startsWith(`${shimPath} `)) return null
-  const words = command.slice(shimPath.length + 1).split(/\s+/).filter(Boolean)
-  let i = 0
-  for (; i < words.length; i++) {
-    const word = words[i] ?? ''
-    if (word === '--') {
-      i++
-      break
-    }
-    if (!word.startsWith('-') || word === '-') break
-    for (let j = 1; j < word.length; j++) {
-      const at = SSH_OPTIONS.indexOf(word[j] ?? '')
-      if (at < 0 || word[j] === ':') return null
-      if (SSH_OPTIONS[at + 1] !== ':') continue
-      // The value is the rest of the word, or the next word.
-      if (j === word.length - 1) i++
-      break
-    }
-  }
-  const host = words[i]
-  return host === undefined ? null : hostName(host)
-}
-
-/** `host` without `ssh://`, `user@` and `:port`; a bare IPv6 address (several colons) stays whole. */
-function hostName(host: string): string {
-  const name = host.replace(/^ssh:\/\//, '').replace(/^.*@/, '')
-  const isUrl = host.startsWith('ssh://')
-  const colons = name.split(':').length - 1
-  return colons > 0 && (isUrl || colons === 1) ? name.slice(0, name.lastIndexOf(':')) : name
-}
-
-/**
- * The host the wrapper that started relay `relayPid` connects to: its immediate parent, run by
- * the relay's own interpreter (both come from the wrapper's shebang). Nothing in between is
- * skipped, so a relay started by a program the genuine relay ran does not pass.
- */
-export function relayWrapperHost(table: PsTable, relayPid: number, shimPath: string): string | null {
-  const relay = table.get(relayPid)
-  const wrapper = relay === undefined ? undefined : table.get(relay.ppid)
-  if (relay === undefined || wrapper === undefined) return null
-  if (wrapper.args.split(' ')[0] !== relay.args.split(' ')[0]) return null
-  return wrapperTarget(wrapper.args, shimPath)
-}
-
 /**
  * `text` without C0 and C1 control characters (ESC included) and the invisible format and
  * bidi characters that reorder or hide text: remote text must not drive the terminal or
@@ -155,7 +109,7 @@ export function isOurHelper(args: string, askpassPath: string): boolean {
 }
 
 /** Output of `ps -o user=,comm=,args= -p <pid>`; macOS prints the full path in `comm`. */
-export function parseParentPs(out: string, pid: number): Requester | null {
+export function parseParentPs(out: string, pid: number): Omit<Requester, 'askedBy'> | null {
   const [, user, commPath, args] = /^\s*(\S+)\s+(\S+)\s+(.*?)\s*$/.exec(firstLine(out)) ?? []
   if (user === undefined || commPath === undefined || args === undefined) return null
   const comm = commPath.split('/').at(-1) ?? commPath
@@ -216,30 +170,12 @@ export class AnsweredPids {
   }
 }
 
-// Programs other than sudo whose askpass answer goes back to them, not to the caller.
-// Plain `git` is left out: `git credential fill` prints the answer to stdout. git's HTTPS
-// prompts come from its remote helper.
-// Linux cuts `comm` at 15 characters (git-remote-https reads as git-remote-http); macOS
-// does not, so comm is cut the same way before the lookup.
-const ASKPASS_CLIENTS = ['ssh', 'ssh-add', 'scp', 'sftp', 'git-remote-http']
-const COMM_LENGTH = 15
-
 export type ExeInfo = { uid: number; path: string }
 
 /** `<owner uid> <path>` of a process's resolved executable. */
 export function parseExeInfo(out: string): ExeInfo | null {
   const [, uid, path] = /^(\d+) (.+)$/.exec(firstLine(out)) ?? []
   return uid === undefined || path === undefined ? null : { uid: Number(uid), path }
-}
-
-/**
- * Whether a non-sudo requester is a real ssh/git binary. Anything else, a shell running
- * askpass directly included, would hand the answer to a command whose output Claude reads.
- * A root-owned binary named like the process rules out scripts and copies in /tmp.
- */
-export function isTrustedClient(requester: Requester, exe: ExeInfo | null): boolean {
-  if (exe === null || exe.uid !== 0 || !ASKPASS_CLIENTS.includes(requester.comm.slice(0, COMM_LENGTH))) return false
-  return (exe.path.split('/').at(-1) ?? '').startsWith(requester.comm)
 }
 
 export type PsTable = Map<number, { ppid: number; args: string }>
