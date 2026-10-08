@@ -379,7 +379,7 @@ function paneRows(request: Request): number {
     (claude === null ? 0 : wrappedLines(claude, PANE_WIDTH)) +
     wrappedLines(commandLine(request), PANE_WIDTH)
   const field = (request.isRetry ? 1 : 0) + wrappedLines(promptLabel(request.prompt), PANE_WIDTH) + 1
-  const blankLines = 2
+  const blankLines = 3
   return wrappedLines(focusWarning(false), PANE_WIDTH) + header + field + 1 + blankLines
 }
 
@@ -840,6 +840,7 @@ export const register: Register = (on, options) => {
           </Text>
         )}
         {isRemote && <Text dimColor>remote</Text>}
+        <Text> </Text>
         {claude !== null && (
           <Text dimColor wrap="wrap">
             {claude}

@@ -164,7 +164,7 @@ for (const surface of SURFACES) {
       title: 'sudo password',
       focus: true,
       closeOnEscape: true,
-      rows: 10,
+      rows: 11,
       columns: 60,
     })
     const ui = await w.mount(surface)
@@ -333,7 +333,7 @@ test('asks for the rows its content needs', async ($, on) => {
   await w.bashCall('sudo -k && ./install.sh', 4100)
   await w.request(4242, 4100, SUDO_PROMPT, `root sudo sudo cp ${'x'.repeat(400)} /opt`)
   // 10 for a plain request, plus the Claude line (1) and two more rows of the clipped `$` line.
-  expect(w.rec.opens.at(-1)?.rows).toBe(13)
+  expect(w.rec.opens.at(-1)?.rows).toBe(14)
 })
 
 test('asks ps for whole command lines', async ($, on) => {
