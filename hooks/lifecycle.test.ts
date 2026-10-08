@@ -1,6 +1,9 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { SESSION_DIR, SESSION_ID, fakeServe, recorder } from './testkit'
+import type { ProcessRunResult } from 'claude-code'
+
+import { fnv1a64 } from './core'
+import { SESSION_DIR, SESSION_ID, WIN_PATH, WIN_PIPE, WIN_SOURCE, WIN_TOKEN, fakeServe, recorder, windowsWorld } from './testkit'
 
 const START = { cwd: '/w', surface: 'terminal', isInteractive: true } as const
 const ASKPASS_VARS = ['CC_ASKPASS_DIR', 'CC_ASKPASS_EXCLUDE', 'CC_ASKPASS_WRAP', 'SUDO_ASKPASS', 'SSH_ASKPASS', 'SSH_ASKPASS_REQUIRE']
@@ -352,4 +355,129 @@ test('CC_ASKPASS_EXCLUDE is empty by default', async ($, on) => {
   const w = await bashWorld($, on)
   await w.ready()
   expect(w.rec.envValue('CC_ASKPASS_EXCLUDE')).toBe('')
+})
+
+const BUILD_ARGS = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File']
+const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+
+/** A native Windows session started with a person at the prompt; the build exits as `build` says. */
+async function winWorld(
+  $: any,
+  on: any,
+  options: { isBuilt?: boolean; source?: string | null; build?: Partial<ProcessRunResult> } = {},
+) {
+  const clock = mock.clock(on)
+  const win = windowsWorld(on, options)
+  const serve = fakeServe(on)
+  const rec = recorder(on, argv => (argv[0] === POWERSHELL ? options.build : undefined))
+  await $.session.start(START)
+  await clock.settle()
+  return {
+    rec,
+    serve,
+    root: win.root(),
+    outDir: `${win.root()}\\win\\out\\${fnv1a64(WIN_SOURCE)}`,
+    builds: () => rec.runs.filter(run => run.argv[0] === POWERSHELL),
+    async ready() {
+      serve.emit(`ready\t${WIN_PIPE}\t${WIN_TOKEN}\n`)
+      await clock.settle()
+    },
+    async stop() {
+      serve.end()
+      await clock.settle()
+    },
+  }
+}
+
+test('Windows builds the helper only when missing', async ($, on) => {
+  const w = await winWorld($, on, { isBuilt: false })
+  expect(w.builds().map(run => run.argv)).toEqual([
+    [POWERSHELL, ...BUILD_ARGS, `${w.root}\\win\\build.ps1`, `${w.root}\\win\\cc-askpass.cs`, w.outDir],
+  ])
+})
+
+test('Windows does not build a helper that exists', async ($, on) => {
+  const w = await winWorld($, on)
+  expect(w.builds()).toEqual([])
+})
+
+test('Windows puts the shim first with ;', async ($, on) => {
+  const w = await winWorld($, on)
+  expect(w.rec.envValue('PATH')).toBe(`${w.outDir}\\shim;${WIN_PATH}`)
+})
+
+test('Windows defines the bash ssh function', async ($, on) => {
+  const w = await winWorld($, on)
+  const ssh = `${w.outDir}\\shim\\ssh.exe`.replaceAll('\\', '/')
+  expect(w.rec.envValue('BASH_FUNC_ssh%%')).toBe(`() {  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "${ssh}" "$@"\n}`)
+  await w.ready()
+  await w.stop()
+  // Never unset, like the PATH entry: the wrapper steps aside on its own.
+  expect(w.rec.envSets.filter(set => set.name === 'BASH_FUNC_ssh%%').map(set => set.value === undefined)).toEqual([false])
+})
+
+test('Windows starts the listener from the built exe', async ($, on) => {
+  const w = await winWorld($, on)
+  expect(w.serve.argvs).toEqual([[`${w.outDir}\\cc-askpass.exe`, 'serve', SESSION_ID]])
+})
+
+test('Windows sets its env on ready', async ($, on) => {
+  const w = await winWorld($, on)
+  expect(w.rec.envSets.filter(set => set.name !== 'PATH' && set.name !== 'BASH_FUNC_ssh%%')).toEqual([])
+  await w.ready()
+  expect(w.rec.envValue('CC_ASKPASS_PIPE')).toBe(WIN_PIPE)
+  expect(w.rec.envValue('SSH_ASKPASS')).toBe(`${w.outDir}\\cc-askpass.exe`)
+  expect(w.rec.envValue('SSH_ASKPASS_REQUIRE')).toBe('force')
+  expect(w.rec.envValue('CC_ASKPASS_WRAP')).toBe('1')
+  expect(w.rec.envValue('CC_ASKPASS_EXCLUDE')).toBe('')
+  await w.stop()
+  expect(w.rec.envValue('CC_ASKPASS_PIPE')).toBe(undefined)
+  expect(w.rec.envValue('SSH_ASKPASS')).toBe(undefined)
+  for (const name of ['SUDO_ASKPASS', 'DISPLAY', 'CC_ASKPASS_DIR']) {
+    expect(w.rec.envSets.some(set => set.name === name)).toBe(false)
+  }
+  expect(w.rec.toasts).toEqual(['cc-askpass: the askpass listener stopped; ssh will not ask for passwords here'])
+})
+
+test('a failed build toasts and changes nothing', async ($, on) => {
+  const w = await winWorld($, on, { isBuilt: false, build: { exitCode: 1, stderr: 'Add-Type is blocked\r\n' } })
+  expect(w.rec.toasts).toEqual(['cc-askpass: could not build the Windows helper: Add-Type is blocked'])
+  expect(w.rec.envSets).toEqual([])
+  expect(w.serve.argvs).toEqual([])
+  expect(await sudoNote($)).toBeUndefined()
+})
+
+test('a missing helper source counts as a failed build', async ($, on) => {
+  const w = await winWorld($, on, { source: null })
+  expect(w.rec.toasts).toHaveLength(1)
+  expect(w.rec.toasts[0]).toMatch(/^cc-askpass: could not build the Windows helper: .*ENOENT/)
+  expect(w.builds()).toEqual([])
+  expect(w.rec.envSets).toEqual([])
+  expect(w.serve.argvs).toEqual([])
+})
+
+const WIN_NOTE =
+  'ssh and git can ask the user for a password or key passphrase in this session: the cc-askpass plugin shows a ' +
+  'prompt inside Claude Code. Run them normally and do not ask the user to type passwords themselves.'
+
+test('Windows system prompt note covers ssh only', async ($, on) => {
+  const w = await winWorld($, on)
+  await w.ready()
+  const text = (await sudoNote($))?.text ?? ''
+  expect(text.startsWith(WIN_NOTE)).toBe(true)
+  expect(text).toContain('ssh host sudo')
+  expect(text).not.toContain('`-n`')
+})
+
+test('Windows system prompt note without remote hosts', { options: { remoteHosts: false } }, async ($, on) => {
+  const w = await winWorld($, on)
+  await w.ready()
+  expect((await sudoNote($))?.text).toBe(WIN_NOTE)
+})
+
+test('Windows session.end removes nothing', async ($, on) => {
+  const w = await winWorld($, on)
+  await w.ready()
+  await $.session.end({ reason: 'prompt_input_exit' } as never)
+  expect(w.rec.runs).toEqual([])
 })

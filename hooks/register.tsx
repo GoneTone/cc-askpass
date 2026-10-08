@@ -1,6 +1,6 @@
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import { askedByLine, type AskSource, type Requester } from './core'
+import { askedByLine, type AskSource, type Requester, type WinRequest } from './core'
 import {
   AnsweredPids,
   applyMaskedInput,
@@ -15,6 +15,8 @@ import {
   parseParentPs,
   parseReady,
   parseRequest,
+  parseWinLine,
+  parseWinReady,
   promptLabel,
   relayHost,
   remoteLabel,
@@ -23,10 +25,14 @@ import {
   wrappedLines,
   shouldMask,
   splitLines,
+  fnv1a64,
+  winClaudeCommand,
+  winRequester,
 } from './core'
 
 const READY_TIMEOUT_MS = 5000
 const REPLY_TIMEOUT_MS = 5000
+const BUILD_TIMEOUT_MS = 60_000
 const ALIVE_POLL_MS = 2000
 // Models add `-n` to sudo to avoid prompts they expect to hang; while the listener runs,
 // the system prompt says sudo can ask instead.
@@ -35,6 +41,10 @@ const SUDO_NOTE =
   'prompt inside Claude Code whenever sudo (or ssh/git) needs one. Run sudo commands normally. ' +
   'Do not add `-n` or `-S`, do not pipe a password into sudo, and do not ask the user to run sudo ' +
   'themselves. If the user cancels or the password is wrong, sudo fails as usual; report that.'
+// Windows has no sudo: only ssh and git ask there.
+const WINDOWS_NOTE =
+  'ssh and git can ask the user for a password or key passphrase in this session: the cc-askpass plugin shows a ' +
+  'prompt inside Claude Code. Run them normally and do not ask the user to type passwords themselves.'
 // Added while remote prompts are on: models add `-t` or ask the user to log in themselves.
 const REMOTE_NOTE =
   ' sudo on hosts reached with `ssh` asks through the same prompt: run `ssh host sudo …` directly, ' +
@@ -79,6 +89,15 @@ type Request = {
 // The password lives only in `typed`, and only while its pane is open.
 let askpassPath = ''
 let sessionDir = ''
+// Native Windows (spec §5): a built helper and a named pipe instead of `sh`, `ps` and FIFOs.
+let isWin = false
+// Windows: the build directory, and the listener's pipe and reply token once it is ready.
+let winOutDir = ''
+let winListener = { pipe: '', token: '' }
+// Windows requests whose asker went away; the listener says so instead of `kill -0`.
+const goneIds = new Set<number>()
+// The commands of PowerShell tool calls running now: the tool puts them on no command line.
+const runningPowerShell: string[] = []
 let didSetDisplay = false
 // True while the listener runs and the env points at it.
 let isListening = false
@@ -113,13 +132,27 @@ function log($: EngineInterface, text: string): void {
 let checking: Promise<void> = Promise.resolve()
 
 function onRequestLine($: EngineInterface, line: string): void {
-  checking = checking.then(() => verify($, line)).catch(error => {
+  checking = checking.then(() => (isWin ? verifyWin($, line) : verify($, line))).catch(error => {
     // ps missing (a slim container) or failing: say so, and let the helper fail now.
     $.ui.toast(`cc-askpass: could not check an askpass request: ${String(error)}`)
     log($, `request failed: ${String(error)}`)
-    const parsed = parseRequest(line)
-    if (parsed !== null) void reply($, parsed.helperPid, '')
+    const parsed = isWin ? parseWinLine(line) : parseRequest(line)
+    if (parsed !== null && !('gone' in parsed)) void reply($, 'id' in parsed ? parsed.id : parsed.helperPid, '')
   })
+}
+
+/** Queues a Windows request: the listener already named who connected. */
+async function verifyWin($: EngineInterface, line: string): Promise<void> {
+  const parsed = parseWinLine(line)
+  if (parsed === null) return log($, `ignored malformed request line: ${line}`)
+  if ('gone' in parsed) {
+    // The alive poll and the queue drop it.
+    goneIds.add(parsed.gone)
+    return
+  }
+  const requester = winRequester(parsed, askpassPath, `${winOutDir}\\shim\\ssh.exe`)
+  const request: Request = { id: parsed.id, prompt: parsed.prompt, requester, isRetry: false, claudeCommand: null }
+  return enqueue($, request, parsed.relay?.via ?? null, parsed.relay?.reported ?? null, parsed.ancestors)
 }
 
 /** Works out who asks with `ps` and queues the request; no caller is refused, the person decides. */
@@ -148,7 +181,21 @@ async function verify($: EngineInterface, line: string): Promise<void> {
     requester = { ...parent, askedBy: await programOf($, parent) }
   }
   const request: Request = { id, prompt: parsed.prompt, requester, isRetry: false, claudeCommand: null }
+  return enqueue($, request, parsed.via, parsed.reported, [])
+}
 
+/**
+ * Cleans a relayed request's remote text, names the command Claude ran and queues the request.
+ * `via` and `reported` are a relay's raw fields; `ancestors` the Windows client's.
+ */
+async function enqueue(
+  $: EngineInterface,
+  request: Request,
+  via: string | null,
+  reported: string | null,
+  ancestors: WinRequest['ancestors'],
+): Promise<void> {
+  const { requester } = request
   if (requester.askedBy.kind === 'relay') {
     // With remote prompts off no relay is taken: the helper is ours, so an empty answer makes it fail at once.
     if (!isRemoteOn) {
@@ -158,12 +205,12 @@ async function verify($: EngineInterface, line: string): Promise<void> {
     // Everything but the host is remote text: it may not drive the terminal.
     const clean = (text: string | null) => (text === null ? null : stripControl(text) || null)
     // The wrapper writes host names only: any other chain is dropped, not shown.
-    const via = parsed.via !== null && VIA_PATTERN.test(parsed.via) ? parsed.via : null
-    requester.remote = { host: requester.askedBy.host, via, reported: clean(parsed.reported) }
-    request.prompt = stripControl(parsed.prompt)
+    const hosts = via !== null && VIA_PATTERN.test(via) ? via : null
+    requester.remote = { host: requester.askedBy.host, via: hosts, reported: clean(reported) }
+    request.prompt = stripControl(request.prompt)
   }
 
-  const claudeCommand = await findClaudeCommand($, requester)
+  const claudeCommand = await findClaudeCommand($, requester, ancestors)
   // A local line that repeats the sudo command says nothing new; a remote pane always names it.
   const isRepeat = requester.remote === undefined && claudeCommand?.trim() === requester.command.trim()
   request.claudeCommand = isRepeat ? null : claudeCommand
@@ -184,8 +231,13 @@ async function programOf($: EngineInterface, parent: Omit<Requester, 'askedBy'>)
   return { kind: 'program', exe: stripControl(path ?? (parent.isSudo ? 'sudo (root)' : parent.comm)) }
 }
 
-/** The Bash command Claude ran that led to `requester`, if one of the recent ones matches. */
-async function findClaudeCommand($: EngineInterface, requester: Requester): Promise<string | null> {
+/** The command Claude ran that led to `requester`: on Windows from the client's `ancestors`. */
+async function findClaudeCommand(
+  $: EngineInterface,
+  requester: Requester,
+  ancestors: WinRequest['ancestors'],
+): Promise<string | null> {
+  if (isWin) return winClaudeCommand(ancestors, recentBashCommands, runningPowerShell)
   const claudePid = claudePidOf(sessionDir)
   if (claudePid === null || recentBashCommands.length === 0) return null
   try {
@@ -206,6 +258,8 @@ async function isAlive($: EngineInterface, pid: number): Promise<boolean> {
 
 /** A relayed request also ends with its relay: nothing is left to carry the answer back. */
 async function isRequestAlive($: EngineInterface, request: Request): Promise<boolean> {
+  // The Windows listener reports a gone asker, relay included: its connection is the request.
+  if (isWin) return !goneIds.has(request.id)
   if (!(await isAlive($, request.id))) return false
   return request.requester.remote === undefined || isAlive($, request.requester.pid)
 }
@@ -394,7 +448,30 @@ async function finish($: EngineInterface, request: Request): Promise<void> {
   await showNext($)
 }
 
+/**
+ * Answers Windows request `id` through `cc-askpass.exe reply`, which hands it to the listener's
+ * reply pipe. Exit 0 means written, not accepted: a wrong token or an ended request is dropped there.
+ */
+async function winReply($: EngineInterface, id: number, password: string): Promise<void> {
+  // The reply is one line: a line break would cut the password short, so it is sent as a cancel.
+  if (/[\r\n]/.test(password)) {
+    log($, `the password for request ${id} had a line break; answered empty`)
+    password = ''
+  }
+  try {
+    const result = await $.process.run([askpassPath, 'reply'], {
+      stdin: `${winListener.token}\t${id}\n${password}\n`,
+      env: { CC_ASKPASS_PIPE: winListener.pipe },
+      timeoutMs: REPLY_TIMEOUT_MS,
+    })
+    if (result.exitCode !== 0) log($, `reply to request ${id} failed: ${result.stderr.trim() || `exit code ${result.exitCode}`}`)
+  } catch (error) {
+    log($, `reply to request ${id} failed: ${String(error)}`)
+  }
+}
+
 async function reply($: EngineInterface, id: number, password: string): Promise<void> {
+  if (isWin) return winReply($, id, password)
   try {
     await $.process.run(['sh', '-c', REPLY_SCRIPT, '_', `${sessionDir}/reply.${id}`], {
       stdin: `${password}\n`,
@@ -415,14 +492,20 @@ async function submit($: EngineInterface, request: Request, password: string): P
 }
 
 async function setEnv($: EngineInterface): Promise<void> {
-  await $.env.set('CC_ASKPASS_DIR', sessionDir)
-  await $.env.set('SUDO_ASKPASS', askpassPath)
+  // Where the helper finds the listener goes first. Windows has no sudo and no DISPLAY check.
+  if (isWin) {
+    await $.env.set('CC_ASKPASS_PIPE', winListener.pipe)
+  } else {
+    await $.env.set('CC_ASKPASS_DIR', sessionDir)
+    await $.env.set('SUDO_ASKPASS', askpassPath)
+  }
   await $.env.set('SSH_ASKPASS', askpassPath)
   await $.env.set('SSH_ASKPASS_REQUIRE', 'force')
   // Read by bin/shim/ssh, one glob per line.
   await $.env.set('CC_ASKPASS_EXCLUDE', excludeHosts.join('\n'))
   // remoteHosts: the wrapper stays on PATH all session and checks this on every call.
   await $.env.set('CC_ASKPASS_WRAP', isRemoteOn ? '1' : undefined)
+  if (isWin) return
   // sudo only uses askpass when DISPLAY is set; a real display is left alone. The marker
   // survives a hot reload (module variables do not), so ownership of :0 is not forgotten.
   const display = await $.env.get('DISPLAY')
@@ -436,8 +519,12 @@ async function setEnv($: EngineInterface): Promise<void> {
 
 async function unsetEnv($: EngineInterface): Promise<void> {
   isListening = false
-  await $.env.set('CC_ASKPASS_DIR', undefined)
-  await $.env.set('SUDO_ASKPASS', undefined)
+  if (isWin) {
+    await $.env.set('CC_ASKPASS_PIPE', undefined)
+  } else {
+    await $.env.set('CC_ASKPASS_DIR', undefined)
+    await $.env.set('SUDO_ASKPASS', undefined)
+  }
   await $.env.set('SSH_ASKPASS', undefined)
   await $.env.set('SSH_ASKPASS_REQUIRE', undefined)
   await $.env.set('CC_ASKPASS_EXCLUDE', undefined)
@@ -449,11 +536,58 @@ async function unsetEnv($: EngineInterface): Promise<void> {
   }
 }
 
+/**
+ * The Windows helper's build directory, `win\out\<hash of its source>`, compiled first when it
+ * holds no `cc-askpass.exe`; otherwise why it could not be built (a missing source counts too).
+ */
+async function buildHelper($: EngineInterface, root: string): Promise<{ outDir: string } | { error: string }> {
+  try {
+    const source = `${root}\\win\\cc-askpass.cs`
+    const outDir = `${root}\\win\\out\\${fnv1a64(await $.fs.read(source))}`
+    if (await $.fs.exists(`${outDir}\\cc-askpass.exe`)) return { outDir }
+    // Windows PowerShell 5.1, whatever the tools run: its Add-Type is the .NET Framework compiler.
+    const systemRoot = (await $.env.get('SystemRoot')) ?? 'C:\\Windows'
+    const powershell = `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+    const build = await $.process.run(
+      [powershell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${root}\\win\\build.ps1`, source, outDir],
+      { timeoutMs: BUILD_TIMEOUT_MS },
+    )
+    if (build.exitCode === 0) return { outDir }
+    // build.ps1 prints one line; PowerShell's own errors put the reason first.
+    const reason = build.stderr.trim().split(/\r?\n/)[0]?.replace(/^cc-askpass: build failed: /, '')
+    return { error: reason || `exit code ${build.exitCode}` }
+  } catch (error) {
+    return { error: String(error) }
+  }
+}
+
+/** Builds the Windows helper and gives bash our ssh; false, toasted, when the build failed. */
+async function startWindows($: EngineInterface): Promise<boolean> {
+  const built = await buildHelper($, $.plugin.root)
+  if ('error' in built) {
+    $.ui.toast(`cc-askpass: could not build the Windows helper: ${built.error}`)
+    return false
+  }
+  winOutDir = built.outDir
+  // Git Bash's profile puts its /usr/bin (and its ssh) before the inherited PATH, so every bash
+  // imports this as an `ssh` function instead; the two variables stop it rewriting `/x` arguments
+  // into Windows paths. Never unset, as the PATH entry is not: the wrapper steps aside on its own.
+  const ssh = `${winOutDir}\\shim\\ssh.exe`.replaceAll('\\', '/')
+  await $.env.set('BASH_FUNC_ssh%%', `() {  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "${ssh}" "$@"\n}`)
+  return true
+}
+
 async function runServe($: EngineInterface): Promise<void> {
   stopServe()
   const generation = ++serveGeneration
-  askpassPath = `${$.plugin.root}/bin/askpass`
-  const serve = $.process.spawn({ argv: [askpassPath, '--serve', await $.session.id()] })
+  askpassPath = isWin ? `${winOutDir}\\cc-askpass.exe` : `${$.plugin.root}/bin/askpass`
+  if (isWin) {
+    // A new listener numbers its requests from 1 again, and the old one's askers send theirs anew.
+    goneIds.clear()
+    queue.length = 0
+    if (current !== null) await finish($, current)
+  }
+  const serve = $.process.spawn({ argv: [askpassPath, isWin ? 'serve' : '--serve', await $.session.id()] })
   stopServe = () => void serve.return(undefined as never)
 
   let isReady = false
@@ -482,11 +616,12 @@ async function runServe($: EngineInterface): Promise<void> {
           onRequestLine($, line)
           continue
         }
-        const dir = parseReady(line)
-        if (dir === null) continue
+        const ready = isWin ? parseWinReady(line) : parseReady(line)
+        if (ready === null) continue
         isReady = true
         readyTimer.cancel()
-        sessionDir = dir
+        if (typeof ready === 'string') sessionDir = ready
+        else winListener = ready
         await setEnv($)
         isListening = true
       }
@@ -502,7 +637,7 @@ async function runServe($: EngineInterface): Promise<void> {
     return
   }
   await unsetEnv($)
-  $.ui.toast('cc-askpass: the askpass listener stopped; sudo will not ask for passwords here')
+  $.ui.toast(`cc-askpass: the askpass listener stopped; ${isWin ? 'ssh' : 'sudo'} will not ask for passwords here`)
 }
 
 export const register: Register = (on, options) => {
@@ -513,9 +648,12 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     // Under -p or the SDK nobody can answer a pane: leave sudo to fail at once as before.
     if (!e.isInteractive) return next(e)
+    isWin = (await $.env.get('OS')) === 'Windows_NT'
     // Before the session's shell snapshot, which fixes PATH for every Bash command: a command
     // that changed PATH itself would lose the permission dialog's "don't ask again".
-    const path = withShim(await $.env.get('PATH'), `${$.plugin.root}/bin/shim`)
+    if (isWin && !(await startWindows($))) return next(e)
+    const shim = isWin ? `${winOutDir}\\shim` : `${$.plugin.root}/bin/shim`
+    const path = withShim(await $.env.get('PATH'), shim, isWin ? ';' : ':')
     if (path !== null) await $.env.set('PATH', path)
     const started = await next(e)
     await $.command.register({
@@ -530,7 +668,8 @@ export const register: Register = (on, options) => {
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
     if (!isListening) return composed
-    const text = isRemoteOn ? SUDO_NOTE + REMOTE_NOTE : SUDO_NOTE
+    const note = isWin ? WINDOWS_NOTE : SUDO_NOTE
+    const text = isRemoteOn ? note + REMOTE_NOTE : note
     return { sections: [...composed.sections, { id: 'cc-askpass:sudo', text, scope: 'session' as const }] }
   })
 
@@ -542,11 +681,25 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // A request's ancestors show that the PowerShell tool runs, not what: while exactly one call
+  // runs, that call is the one (spec §7). The tool has no typed arguments, so it is matched by pattern.
+  on('tool.call', { tool: /^PowerShell$/ }, async ($, e, next) => {
+    const { command } = e as { command?: unknown }
+    if (typeof command !== 'string') return next(e)
+    runningPowerShell.push(command)
+    try {
+      return await next(e)
+    } finally {
+      runningPowerShell.splice(runningPowerShell.indexOf(command), 1)
+    }
+  })
+
   on('session.end', async ($, e, next) => {
     // After /clear or an in-process resume the process goes on under a new session id and
     // no session.start follows, so the listener and the env pointing at its dir stay.
+    // The Windows listener leaves no files: it ends with Claude Code.
     const isProcessEnding = e.reason !== 'clear' && e.reason !== 'resume'
-    if (isProcessEnding && sessionDir !== '') await $.process.run(['rm', '-rf', sessionDir])
+    if (!isWin && isProcessEnding && sessionDir !== '') await $.process.run(['rm', '-rf', sessionDir])
     return next(e)
   })
 

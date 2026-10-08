@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { SESSION_DIR, fakeServe, recorder } from './testkit'
+import { SESSION_DIR, WIN_PIPE, WIN_TOKEN, fakeServe, recorder, windowsWorld } from './testkit'
 
 const START = { cwd: '/w', surface: 'terminal', isInteractive: true } as const
 const SURFACES = ['terminal', 'desktop'] as const
@@ -781,4 +781,205 @@ test('a remote sudo asking something else is no retry', async ($, on) => {
   const w = await world($, on)
   const sorry = await answerThenRelay(w, $, { prompt: BOB_PROMPT, reported: 'sudo true' }, { prompt: 'Verification code: ', reported: 'sudo true' })
   expect(sorry).toBeUndefined()
+})
+
+const WIN_SSH = 'C:\\Windows\\System32\\OpenSSH\\ssh.exe'
+const PASSPHRASE_PROMPT = "Enter passphrase for key 'C:\\Users\\alice/.ssh/id_ed25519': "
+const PWSH_LAUNCHER = 'pwsh -NoProfile -NonInteractive -Command "Invoke-Expression -Command $__claudeCodeScript"'
+
+type WinLine = {
+  client?: { pid: number; exe: string }
+  parent?: { pid: number; exe: string; args: string } | null
+  ancestors?: { pid: number; args: string }[]
+  prompt?: string
+  relay?: { host: string; realSsh: string; remotePid: number; via: string | null; reported: string | null } | null
+}
+
+/** A native Windows session with a ready listener that emits JSON request lines. */
+async function winWorld($: any, on: any) {
+  const clock = mock.clock(on)
+  windowsWorld(on)
+  const serve = fakeServe(on)
+  const rec = recorder(on)
+  // Stands in for the shell tools: a PowerShell call runs until the test ends it.
+  const running = new Map<string, () => void>()
+  on('tool.call', (_$: unknown, e: { tool: string; command: string }) => {
+    const result = { result: { stdout: '', stderr: '', interrupted: false }, text: '' } as never
+    if (e.tool !== 'PowerShell') return result
+    return new Promise(resolve => running.set(e.command, () => resolve(result)))
+  })
+  await $.session.start(START)
+  serve.emit(`ready\t${WIN_PIPE}\t${WIN_TOKEN}\n`)
+  await clock.settle()
+  const exe = serve.argvs[0]?.[0] ?? ''
+
+  return {
+    clock,
+    rec,
+    exe,
+    shim: exe.replace(/cc-askpass\.exe$/, 'shim\\ssh.exe'),
+    /** Request `id` from `line`; by default our helper asking for Windows OpenSSH (pid 5100). */
+    async request(id: number, line: WinLine = {}) {
+      const parent = { pid: 5100, exe: WIN_SSH, args: 'ssh -T git@github.com' }
+      const request = {
+        id,
+        client: { pid: 5200, exe },
+        parent,
+        ancestors: [{ pid: 5100, args: parent.args }],
+        prompt: PASSPHRASE_PROMPT,
+        relay: null,
+        ...line,
+      }
+      serve.emit(`${JSON.stringify(request)}\n`)
+      await clock.settle()
+    },
+    async gone(id: number) {
+      serve.emit(`{"gone":${id}}\n`)
+      await clock.settle()
+    },
+    /** Claude starts a PowerShell call that runs until `end` is called. */
+    async powerShell(command: string) {
+      // A call still running when the test ends is dropped with it.
+      $.tool.call({ tool: 'PowerShell', command } as never).catch(() => {})
+      await clock.settle()
+      return { end: () => running.get(command)?.() }
+    },
+    replies() {
+      return rec.runs.filter(run => run.argv[1] === 'reply')
+    },
+    mount() {
+      return $.ui.mount({ plugin: 'cc-askpass', surface: 'terminal', component: 'Pane', props: PANE_PROPS, requestId: 'askpass' })
+    },
+  }
+}
+
+test('a Windows request shows the asking program', async ($, on) => {
+  const w = await winWorld($, on)
+  await w.request(1)
+  expect(w.rec.opens.at(-1)?.title).toBe('Password requested by ssh (pid 5100)')
+  const ui = await w.mount()
+  expect((await ui.find({ type: 'Text', text: /needs/ }))?.text).toBe('ssh (pid 5100) needs a password')
+  expect((await ui.find({ text: /^Asked by:/ }))?.text).toBe(`Asked by: ${WIN_SSH}`)
+  expect(await ui.find({ text: UNVERIFIED_WARNING })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /^\$ / }))?.text).toBe('$ ssh -T git@github.com')
+})
+
+test('a Windows reply goes through the helper', async ($, on) => {
+  const w = await winWorld($, on)
+  await w.request(7)
+  const ui = await w.mount()
+  await typeMasked(ui, await passwordKey(ui), PASSWORD)
+  await ui.input({ key: await passwordKey(ui), text: '•'.repeat(PASSWORD.length) })
+  await w.clock.settle()
+  expect(w.replies()).toEqual([
+    { argv: [w.exe, 'reply'], stdin: `${WIN_TOKEN}\t7\n${PASSWORD}\n`, env: { CC_ASKPASS_PIPE: WIN_PIPE } },
+  ])
+  expect(w.rec.runs.some(run => run.argv[0] === 'sh' || run.argv[0] === 'ps')).toBe(false)
+  expect(w.rec.closes).toContain('askpass')
+})
+
+test('a Windows password with a line break is answered empty', async ($, on) => {
+  const w = await winWorld($, on)
+  await w.request(7)
+  const ui = await w.mount()
+  await ui.press({ key: 'toggle' })
+  await ui.input({ key: await passwordKey(ui), text: 'secret\nrm -rf' })
+  await w.clock.settle()
+  expect(w.replies().map(reply => reply.stdin)).toEqual([`${WIN_TOKEN}\t7\n\n`])
+  expect(w.rec.logs.some(text => text.includes('line break'))).toBe(true)
+  expect(w.rec.logs.some(text => text.includes('secret'))).toBe(false)
+})
+
+test('a direct pipe client shows as unverified', async ($, on) => {
+  const w = await winWorld($, on)
+  await w.request(1, { client: { pid: 6666, exe: 'C:\\x\\evil.exe' } })
+  const ui = await w.mount()
+  expect((await ui.find({ text: /^Asked by:/ }))?.text).toBe('Asked by: C:\\x\\evil.exe (unverified)')
+  expect(await ui.find({ type: 'Text', text: UNVERIFIED_WARNING })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /needs/ }))?.text).toBe('evil (pid 6666) needs a password')
+})
+
+test('a Windows relay shows the wrapper and the real ssh', async ($, on) => {
+  const w = await winWorld($, on)
+  const relay = { host: 'server', realSsh: WIN_SSH, remotePid: 4242, via: 'server', reported: 'sudo apt update' }
+  await w.request(1, { client: { pid: 5300, exe: w.shim }, prompt: BOB_PROMPT, relay })
+  const ui = await w.mount()
+  expect(await ui.find({ type: 'Text', text: /^remote$/ })).toBeDefined()
+  expect((await ui.find({ text: /^Asked by:/ }))?.text).toBe(`Asked by: cc-askpass ssh wrapper → server (${WIN_SSH})`)
+  expect((await ui.find({ type: 'Text', text: /needs/ }))?.text).toBe('sudo on server needs your password')
+  expect((await ui.find({ type: 'Text', text: /^\$ / }))?.text).toBe('$ sudo apt update (reported by server)')
+})
+
+test('a Windows relay is answered empty with remoteHosts off', { options: { remoteHosts: false } }, async ($, on) => {
+  const w = await winWorld($, on)
+  const relay = { host: 'server', realSsh: WIN_SSH, remotePid: 4242, via: null, reported: null }
+  await w.request(3, { client: { pid: 5300, exe: w.shim }, prompt: BOB_PROMPT, relay })
+  expect(w.rec.opens).toEqual([])
+  expect(w.replies().map(reply => reply.stdin)).toEqual([`${WIN_TOKEN}\t3\n\n`])
+})
+
+test('gone closes the pane', async ($, on) => {
+  const w = await winWorld($, on)
+  await w.request(1)
+  await w.gone(1)
+  await w.clock.advance(2000)
+  expect(w.rec.closes).toContain('askpass')
+  expect(w.replies()).toEqual([])
+})
+
+test('gone skips a queued request', async ($, on) => {
+  const w = await winWorld($, on)
+  await w.request(1)
+  await w.request(2)
+  await w.gone(2)
+  const ui = await w.mount()
+  await ui.press({ key: 'cancel' })
+  await w.clock.settle()
+  expect(w.rec.opens).toHaveLength(1)
+})
+
+test('Claude ran from a single PowerShell call', async ($, on) => {
+  const w = await winWorld($, on)
+  const call = await w.powerShell('ssh server sudo true; git push')
+  const ancestors = [{ pid: 5100, args: 'ssh server' }, { pid: 5000, args: PWSH_LAUNCHER }]
+  await w.request(1, { ancestors })
+  let ui = await w.mount()
+  expect((await ui.find({ type: 'Text', text: /^Claude ran:/ }))?.text).toBe('Claude ran: ssh server sudo true; git push')
+  await ui.press({ key: 'cancel' })
+  await w.clock.settle()
+  await ui.unmount()
+  const other = await w.powerShell('git fetch')
+  await w.request(2, { ancestors })
+  ui = await w.mount()
+  expect(await ui.find({ type: 'Text', text: /^Claude ran:/ })).toBeUndefined()
+  call.end()
+  other.end()
+  await w.clock.settle()
+})
+
+test('Claude ran from a Bash call on Windows', async ($, on) => {
+  const w = await winWorld($, on)
+  await $.tool.call({ tool: 'Bash', command: 'ssh server true && echo ok' } as never)
+  const shell = `C:\\Program Files\\Git\\bin\\bash.exe -c "source /x && eval 'ssh server true && echo ok' < /dev/null"`
+  await w.request(1, { ancestors: [{ pid: 5100, args: 'ssh server true' }, { pid: 5000, args: shell }] })
+  const ui = await w.mount()
+  expect((await ui.find({ type: 'Text', text: /^Claude ran:/ }))?.text).toBe('Claude ran: ssh server true && echo ok')
+})
+
+test('password never leaks on Windows', async ($, on) => {
+  const w = await winWorld($, on)
+  await w.request(7)
+  const ui = await w.mount()
+  await typeMasked(ui, await passwordKey(ui), PASSWORD)
+  await ui.input({ key: await passwordKey(ui), text: '•'.repeat(PASSWORD.length) })
+  await w.clock.settle()
+  const shown = [
+    ...w.rec.toasts,
+    ...w.rec.logs,
+    ...w.rec.opens.map(open => open.title ?? ''),
+    ...w.rec.envSets.map(set => `${set.name}=${set.value ?? ''}`),
+  ].join('\n')
+  expect(shown.includes(PASSWORD.trim())).toBe(false)
+  expect(w.rec.runs.some(run => run.argv.some(arg => arg.includes(PASSWORD.trim())))).toBe(false)
+  expect(w.rec.runs.some(run => Object.values(run.env ?? {}).some(value => value.includes(PASSWORD.trim())))).toBe(false)
 })

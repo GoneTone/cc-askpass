@@ -77,9 +77,111 @@ export function remoteLabel(host: string, via: string | null): string {
 }
 
 /** `path` with `dir` first, or null when `dir` is already on it (a reload). */
-export function withShim(path: string | undefined, dir: string): string | null {
+export function withShim(path: string | undefined, dir: string, separator: ':' | ';' = ':'): string | null {
   if (path === undefined || path === '') return dir
-  return path.split(':').includes(dir) ? null : `${dir}:${path}`
+  return path.split(separator).includes(dir) ? null : `${dir}${separator}${path}`
+}
+
+/**
+ * 64-bit FNV-1a of `text`'s UTF-16 code units, low byte first, as 16 hex digits: names the
+ * Windows helper's build after its source.
+ */
+export function fnv1a64(text: string): string {
+  let hash = 0xcbf29ce484222325n
+  for (let i = 0; i < text.length; i++) {
+    const unit = text.charCodeAt(i)
+    for (const byte of [unit & 0xff, unit >> 8]) hash = ((hash ^ BigInt(byte)) * 0x100000001b3n) & 0xffffffffffffffffn
+  }
+  return hash.toString(16).padStart(16, '0')
+}
+
+/** The Windows listener's first line, `ready<TAB><pipe name><TAB><32-digit token>`. */
+export function parseWinReady(line: string): { pipe: string; token: string } | null {
+  const [, pipe, token] = /^ready\t(cc-askpass-[^\t\\]+)\t([0-9a-f]{32})\r?$/.exec(line) ?? []
+  return pipe === undefined || token === undefined ? null : { pipe, token }
+}
+
+/** A request as the Windows listener describes it: who connected (pid from the kernel) and what it asked. */
+export type WinRequest = {
+  id: number
+  client: { pid: number; exe: string }
+  parent: { pid: number; exe: string; args: string } | null
+  // The client's ancestors from its parent up to Claude Code, for `Claude ran:`.
+  ancestors: { pid: number; args: string }[]
+  prompt: string
+  relay: { host: string; realSsh: string; remotePid: number; via: string | null; reported: string | null } | null
+}
+
+/** One line of the Windows listener: a request, or `{"gone":<id>}` when its asker went away. */
+export function parseWinLine(line: string): WinRequest | { gone: number } | null {
+  let value: Partial<WinRequest> & { gone?: unknown }
+  try {
+    value = JSON.parse(line)
+  } catch {
+    return null
+  }
+  if (typeof value?.gone === 'number') return { gone: value.gone }
+  const isRequest =
+    Number.isInteger(value?.id) &&
+    typeof value.client?.pid === 'number' &&
+    typeof value.client.exe === 'string' &&
+    typeof value.prompt === 'string' &&
+    Array.isArray(value.ancestors)
+  return isRequest ? (value as WinRequest) : null
+}
+
+const isSamePath = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()
+
+/**
+ * Who a Windows request says asked: through our helper, the program that started it; through
+ * our ssh wrapper, its relay; anything else, the client itself, unverified.
+ */
+export function winAskSource(request: WinRequest, helperExe: string, shimExe: string): AskSource {
+  const { client, parent, relay } = request
+  if (isSamePath(client.exe, helperExe)) {
+    return parent === null ? { kind: 'unverified', exe: null } : { kind: 'program', exe: parent.exe }
+  }
+  // The host comes from the wrapper's arguments, which Claude chose: it may not drive the terminal.
+  if (isSamePath(client.exe, shimExe) && relay !== null) {
+    return { kind: 'relay', host: stripControl(relay.host), realSsh: relay.realSsh }
+  }
+  return { kind: 'unverified', exe: client.exe }
+}
+
+/**
+ * A Windows request's Requester, naming the process `Asked by:` names: the program behind our
+ * helper, or else the client. `remote` is left to the caller, which cleans the relay's text.
+ */
+export function winRequester(request: WinRequest, helperExe: string, shimExe: string): Requester {
+  const askedBy = winAskSource(request, helperExe, shimExe)
+  const { client, parent } = request
+  const asker = askedBy.kind === 'program' && parent !== null ? parent : client
+  const args = stripControl(parent?.args ?? '')
+  return {
+    pid: asker.pid,
+    isSudo: false,
+    comm: (asker.exe.split(/[\\/]/).at(-1) ?? '').replace(/\.exe$/i, '') || 'unknown program',
+    command: args.length > MAX_COMMAND_LENGTH ? `${args.slice(0, MAX_COMMAND_LENGTH)}…` : args,
+    askedBy,
+  }
+}
+
+/**
+ * The command Claude ran that led to a Windows request. A Bash call is on its shell's command
+ * line, matched from the outermost ancestor in; a PowerShell call is on none, so it is named
+ * only when an ancestor runs the PowerShell tool's launcher and exactly one call is running.
+ */
+export function winClaudeCommand(
+  ancestors: WinRequest['ancestors'],
+  recentBash: readonly string[],
+  runningPowerShell: readonly string[],
+): string | null {
+  for (const { args } of ancestors.toReversed()) {
+    const command = matchBashCommand(args, recentBash)
+    if (command !== null) return command
+  }
+  const isPowerShell = ancestors.some(({ args }) => args.includes('$__claudeCodeScript'))
+  return isPowerShell && runningPowerShell.length === 1 ? (runningPowerShell[0] ?? null) : null
 }
 
 /**

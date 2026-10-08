@@ -22,6 +22,13 @@ import {
   wrappedLines,
   shouldMask,
   splitLines,
+  fnv1a64,
+  parseWinReady,
+  parseWinLine,
+  winAskSource,
+  winClaudeCommand,
+  winRequester,
+  type WinRequest,
 } from './core'
 
 test('splitLines joins a line split across chunks', () => {
@@ -243,4 +250,85 @@ test('clipLines keeps text within a number of rows', () => {
   expect(clipLines('x'.repeat(40), 3, 10)).toBe(`${'x'.repeat(29)}…`)
   expect(clipLines('1\n2\n3\n4\n5', 3, 10)).toBe('1\n2\n3…')
   expect(wrappedLines(clipLines(`a\n${'y'.repeat(50)}\nb`, 3, 10), 10)).toBe(3)
+})
+
+test('fnv1a64 hashes UTF-16 code units, low byte first', () => {
+  expect(fnv1a64('')).toBe('cbf29ce484222325')
+  // Bytes 61 00.
+  expect(fnv1a64('a')).toBe('089be207b544f1e4')
+  expect(fnv1a64('a')).not.toBe(fnv1a64('b'))
+})
+
+test('withShim splits a Windows PATH on ;', () => {
+  expect(withShim('C:\\a;C:\\b', 'C:\\s', ';')).toBe('C:\\s;C:\\a;C:\\b')
+  expect(withShim('C:\\a;C:\\s;C:\\b', 'C:\\s', ';')).toBe(null)
+})
+
+test('parseWinReady reads the pipe name and a 32-digit token', () => {
+  const token = 'a'.repeat(32)
+  expect(parseWinReady(`ready\tcc-askpass-S-900\t${token}`)).toEqual({ pipe: 'cc-askpass-S-900', token })
+  expect(parseWinReady(`ready\tcc-askpass-S-900\t${'a'.repeat(31)}`)).toBe(null)
+  expect(parseWinReady('ready\t/run/user/1000/cc-askpass/S-900')).toBe(null)
+})
+
+const HELPER = 'C:\\p\\win\\out\\0123456789abcdef\\cc-askpass.exe'
+const SHIM = 'C:\\p\\win\\out\\0123456789abcdef\\shim\\ssh.exe'
+const WIN_SSH = 'C:\\Windows\\System32\\OpenSSH\\ssh.exe'
+
+function winRequest(fields: Partial<WinRequest> = {}): WinRequest {
+  return {
+    id: 7,
+    client: { pid: 1, exe: HELPER },
+    parent: { pid: 2, exe: WIN_SSH, args: 'ssh -T git@github.com' },
+    ancestors: [{ pid: 2, args: 'ssh -T git@github.com' }],
+    prompt: 'Enter passphrase for key: ',
+    relay: null,
+    ...fields,
+  }
+}
+
+test('parseWinLine reads requests and gone lines', () => {
+  const request = winRequest()
+  expect(parseWinLine(JSON.stringify(request))).toEqual(request)
+  expect(parseWinLine('{"gone":3}')).toEqual({ gone: 3 })
+  expect(parseWinLine('garbage')).toBe(null)
+  const { id: _, ...noId } = request
+  expect(parseWinLine(JSON.stringify(noId))).toBe(null)
+})
+
+test('winAskSource names the program behind our helper, our relay, or the client', () => {
+  expect(winAskSource(winRequest(), HELPER, SHIM)).toEqual({ kind: 'program', exe: WIN_SSH })
+  // Windows paths ignore case.
+  const upper = winRequest({ client: { pid: 1, exe: HELPER.toUpperCase() } })
+  expect(winAskSource(upper, HELPER, SHIM)).toEqual({ kind: 'program', exe: WIN_SSH })
+  expect(winAskSource(winRequest({ parent: null }), HELPER, SHIM)).toEqual({ kind: 'unverified', exe: null })
+  const relay = { host: 'server', realSsh: WIN_SSH, remotePid: 4242, via: null, reported: null }
+  expect(winAskSource(winRequest({ client: { pid: 1, exe: SHIM }, relay }), HELPER, SHIM)).toEqual({
+    kind: 'relay',
+    host: 'server',
+    realSsh: WIN_SSH,
+  })
+  const evil = winRequest({ client: { pid: 1, exe: 'C:\\x\\evil.exe' }, relay })
+  expect(winAskSource(evil, HELPER, SHIM)).toEqual({ kind: 'unverified', exe: 'C:\\x\\evil.exe' })
+})
+
+test('winRequester names the process that Asked by names', () => {
+  expect(winRequester(winRequest(), HELPER, SHIM)).toEqual({
+    pid: 2,
+    isSudo: false,
+    comm: 'ssh',
+    command: 'ssh -T git@github.com',
+    askedBy: { kind: 'program', exe: WIN_SSH },
+  })
+  const evil = winRequester(winRequest({ client: { pid: 1, exe: 'C:\\x\\evil.exe' } }), HELPER, SHIM)
+  expect([evil.pid, evil.comm]).toEqual([1, 'evil'])
+})
+
+test('winClaudeCommand matches Bash calls, then a single PowerShell call', () => {
+  const bash = [{ pid: 2, args: 'ssh h' }, { pid: 3, args: `bash.exe -c "eval 'ssh h && git push'"` }]
+  expect(winClaudeCommand(bash, ['ssh h', 'ssh h && git push'], [])).toBe('ssh h && git push')
+  const pwsh = [{ pid: 2, args: 'ssh h' }, { pid: 3, args: 'pwsh -Command "Invoke-Expression -Command $__claudeCodeScript"' }]
+  expect(winClaudeCommand(pwsh, [], ['ssh h'])).toBe('ssh h')
+  expect(winClaudeCommand(pwsh, [], ['ssh h', 'git push'])).toBe(null)
+  expect(winClaudeCommand([{ pid: 2, args: 'ssh h' }], [], ['ssh h'])).toBe(null)
 })

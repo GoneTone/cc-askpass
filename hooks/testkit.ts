@@ -1,6 +1,7 @@
 // Test helpers shared by the *.test.ts files: a fake serve process and recorders
 // for the engine calls the mod makes.
 import type { On, ProcessRunResult } from 'claude-code'
+import { mock } from 'claude-code/testing'
 
 export const SESSION_ID = 'S'
 // Named <session id>-<Claude Code pid>; the pid (900) roots the process trees tests build.
@@ -41,7 +42,31 @@ export function fakeServe(on: On) {
   }
 }
 
-export type RunCall = { argv: readonly string[]; stdin?: string }
+// What a Windows test's helper source reads as; the build directory is named after its hash.
+export const WIN_SOURCE = '// cc-askpass.cs stand-in\n'
+export const WIN_PIPE = 'cc-askpass-S-900'
+export const WIN_TOKEN = '0123456789abcdef0123456789abcdef'
+export const WIN_PATH = 'C:\\Windows\\system32;C:\\Windows'
+
+/**
+ * Answers as native Windows: `OS`, `SystemRoot` and PATH, the helper's source (none with
+ * `source: null`), and whether its build exists. `root()` is the plugin root the mod read under.
+ */
+export function windowsWorld(on: On, options: { isBuilt?: boolean; source?: string | null } = {}) {
+  const reads: string[] = []
+  mock.env(on, { OS: 'Windows_NT', SystemRoot: 'C:\\Windows', PATH: WIN_PATH })
+  on('fs.read', (_$, e) => {
+    reads.push(e.path)
+    if (options.source === null) return { deny: `ENOENT: no such file, open '${e.path}'` }
+    return { value: options.source ?? WIN_SOURCE }
+  })
+  on('fs.exists', () => ({ value: options.isBuilt ?? true }))
+  return {
+    root: () => (reads[0] ?? '').replace(/\\win\\cc-askpass\.cs$/, ''),
+  }
+}
+
+export type RunCall = { argv: readonly string[]; stdin?: string; env?: Record<string, string> }
 
 /**
  * Records what the mod does to the world beneath it. `answer` decides each
@@ -82,7 +107,7 @@ export function recorder(on: On, answer: (argv: readonly string[]) => Partial<Pr
     return { value: { command: e.name } }
   })
   on('process.run', (_$, e) => {
-    runs.push({ argv: e.argv, stdin: e.init?.stdin })
+    runs.push({ argv: e.argv, stdin: e.init?.stdin, ...(e.init?.env === undefined ? {} : { env: e.init.env }) })
     return {
       value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false, ...answer(e.argv) },
     }
