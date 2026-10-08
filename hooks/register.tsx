@@ -83,6 +83,8 @@ type Request = {
   claudeCommand: string | null
   // Set before the first await of an answer, so Enter, Esc and the alive poll answer once.
   isAnswered?: boolean
+  // Windows: the listener generation it came from; its id means nothing to any other listener.
+  generation?: number
 }
 
 // Module state. A hot reload starts it over and kills the serve child with the module.
@@ -131,18 +133,24 @@ function log($: EngineInterface, text: string): void {
 // Requests are checked one at a time, so the queue keeps the order they arrived in.
 let checking: Promise<void> = Promise.resolve()
 
-function onRequestLine($: EngineInterface, line: string): void {
-  checking = checking.then(() => (isWin ? verifyWin($, line) : verify($, line))).catch(error => {
-    // ps missing (a slim container) or failing: say so, and let the helper fail now.
-    $.ui.toast(`cc-askpass: could not check an askpass request: ${String(error)}`)
-    log($, `request failed: ${String(error)}`)
-    const parsed = isWin ? parseWinLine(line) : parseRequest(line)
-    if (parsed !== null && !('gone' in parsed)) void reply($, 'id' in parsed ? parsed.id : parsed.helperPid, '')
-  })
+/** A line of the listener of `generation`, checked behind the lines before it. */
+function onRequestLine($: EngineInterface, line: string, generation: number): void {
+  // Windows ids restart at 1 with each listener: a replaced one's lines would name the new one's requests.
+  const isStale = () => isWin && generation !== serveGeneration
+  checking = checking
+    .then(() => (isStale() ? undefined : isWin ? verifyWin($, line, generation) : verify($, line)))
+    .catch(error => {
+      // ps missing (a slim container) or failing: say so, and let the helper fail now.
+      $.ui.toast(`cc-askpass: could not check an askpass request: ${String(error)}`)
+      log($, `request failed: ${String(error)}`)
+      if (isStale()) return
+      const parsed = isWin ? parseWinLine(line) : parseRequest(line)
+      if (parsed !== null && !('gone' in parsed)) void reply($, 'id' in parsed ? parsed.id : parsed.helperPid, '')
+    })
 }
 
 /** Queues a Windows request: the listener already named who connected. */
-async function verifyWin($: EngineInterface, line: string): Promise<void> {
+async function verifyWin($: EngineInterface, line: string, generation: number): Promise<void> {
   const parsed = parseWinLine(line)
   if (parsed === null) return log($, `ignored malformed request line: ${line}`)
   if ('gone' in parsed) {
@@ -151,7 +159,14 @@ async function verifyWin($: EngineInterface, line: string): Promise<void> {
     return
   }
   const requester = winRequester(parsed, askpassPath, `${winOutDir}\\shim\\ssh.exe`)
-  const request: Request = { id: parsed.id, prompt: parsed.prompt, requester, isRetry: false, claudeCommand: null }
+  const request: Request = {
+    id: parsed.id,
+    prompt: parsed.prompt,
+    requester,
+    isRetry: false,
+    claudeCommand: null,
+    generation,
+  }
   return enqueue($, request, parsed.relay?.via ?? null, parsed.relay?.reported ?? null, parsed.ancestors)
 }
 
@@ -207,8 +222,9 @@ async function enqueue(
     // The wrapper writes host names only: any other chain is dropped, not shown.
     const hosts = via !== null && VIA_PATTERN.test(via) ? via : null
     requester.remote = { host: requester.askedBy.host, via: hosts, reported: clean(reported) }
-    request.prompt = stripControl(request.prompt)
   }
+  // Any program can raise a pane, so no prompt may drive the terminal either.
+  request.prompt = stripControl(request.prompt)
 
   const claudeCommand = await findClaudeCommand($, requester, ancestors)
   // A local line that repeats the sudo command says nothing new; a remote pane always names it.
@@ -259,7 +275,8 @@ async function isAlive($: EngineInterface, pid: number): Promise<boolean> {
 /** A relayed request also ends with its relay: nothing is left to carry the answer back. */
 async function isRequestAlive($: EngineInterface, request: Request): Promise<boolean> {
   // The Windows listener reports a gone asker, relay included: its connection is the request.
-  if (isWin) return !goneIds.has(request.id)
+  // An ended or replaced listener took every connection with it.
+  if (isWin) return isListening && request.generation === serveGeneration && !goneIds.has(request.id)
   if (!(await isAlive($, request.id))) return false
   return request.requester.remote === undefined || isAlive($, request.requester.pid)
 }
@@ -577,16 +594,21 @@ async function startWindows($: EngineInterface): Promise<boolean> {
   return true
 }
 
+/**
+ * Drops every Windows request: they went with the listener that held their connections, and no
+ * `gone` line will come. A new listener numbers its requests from 1; the askers send theirs anew.
+ */
+async function dropWinRequests($: EngineInterface): Promise<void> {
+  goneIds.clear()
+  queue.length = 0
+  if (current !== null) await finish($, current)
+}
+
 async function runServe($: EngineInterface): Promise<void> {
   stopServe()
   const generation = ++serveGeneration
   askpassPath = isWin ? `${winOutDir}\\cc-askpass.exe` : `${$.plugin.root}/bin/askpass`
-  if (isWin) {
-    // A new listener numbers its requests from 1 again, and the old one's askers send theirs anew.
-    goneIds.clear()
-    queue.length = 0
-    if (current !== null) await finish($, current)
-  }
+  if (isWin) await dropWinRequests($)
   const serve = $.process.spawn({ argv: [askpassPath, isWin ? 'serve' : '--serve', await $.session.id()] })
   stopServe = () => void serve.return(undefined as never)
 
@@ -613,7 +635,7 @@ async function runServe($: EngineInterface): Promise<void> {
       rest = split.rest
       for (const line of split.lines) {
         if (isReady) {
-          onRequestLine($, line)
+          onRequestLine($, line, generation)
           continue
         }
         const ready = isWin ? parseWinReady(line) : parseReady(line)
@@ -637,6 +659,7 @@ async function runServe($: EngineInterface): Promise<void> {
     return
   }
   await unsetEnv($)
+  if (isWin) await dropWinRequests($)
   $.ui.toast(`cc-askpass: the askpass listener stopped; ${isWin ? 'ssh' : 'sudo'} will not ask for passwords here`)
 }
 

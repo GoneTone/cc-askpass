@@ -294,6 +294,28 @@ test('parseWinLine reads requests and gone lines', () => {
   expect(parseWinLine('garbage')).toBe(null)
   const { id: _, ...noId } = request
   expect(parseWinLine(JSON.stringify(noId))).toBe(null)
+  const relay = { host: 'server', realSsh: WIN_SSH, remotePid: 4242, via: null, reported: 'sudo true' }
+  expect(parseWinLine(JSON.stringify(winRequest({ relay })))).toEqual(winRequest({ relay }))
+})
+
+test('parseWinLine rejects fields of the wrong type', () => {
+  const relay = { host: 'server', realSsh: WIN_SSH, remotePid: 4242, via: null, reported: null }
+  const wrong: Record<string, unknown>[] = [
+    { parent: 'ssh' },
+    { parent: { pid: '2', exe: WIN_SSH, args: '' } },
+    { parent: { pid: 2, exe: WIN_SSH } },
+    { parent: undefined },
+    { relay: 'server' },
+    { relay: { ...relay, host: 7 } },
+    { relay: { ...relay, realSsh: null } },
+    { relay: { ...relay, remotePid: '4242' } },
+    { relay: { ...relay, via: 1 } },
+    { relay: { ...relay, reported: false } },
+    { ancestors: [null] },
+    { ancestors: [{ pid: '2', args: '' }] },
+    { ancestors: [{ pid: 2 }] },
+  ]
+  for (const fields of wrong) expect(parseWinLine(JSON.stringify({ ...winRequest(), ...fields }))).toBe(null)
 })
 
 test('winAskSource names the program behind our helper, our relay, or the client', () => {
@@ -310,6 +332,24 @@ test('winAskSource names the program behind our helper, our relay, or the client
   })
   const evil = winRequest({ client: { pid: 1, exe: 'C:\\x\\evil.exe' }, relay })
   expect(winAskSource(evil, HELPER, SHIM)).toEqual({ kind: 'unverified', exe: 'C:\\x\\evil.exe' })
+  // Either slash.
+  const forward = winRequest({ client: { pid: 1, exe: HELPER.replaceAll('\\', '/') } })
+  expect(winAskSource(forward, HELPER, SHIM)).toEqual({ kind: 'program', exe: WIN_SSH })
+})
+
+test('winAskSource strips bidi and control characters from paths', () => {
+  // U+202E turns `evil\u202Egpj.exe` into what reads as "evilexe.jpg".
+  const disguised = winRequest({ client: { pid: 1, exe: 'C:\\x\\evil\u202egpj.exe' } })
+  expect(winAskSource(disguised, HELPER, SHIM)).toEqual({ kind: 'unverified', exe: 'C:\\x\\evilgpj.exe' })
+  expect(winRequester(disguised, HELPER, SHIM).comm).toBe('evilgpj')
+  const parent = { pid: 2, exe: 'C:\\x\\s\u202esh.exe', args: '' }
+  expect(winAskSource(winRequest({ parent }), HELPER, SHIM)).toEqual({ kind: 'program', exe: 'C:\\x\\ssh.exe' })
+  const relay = { host: 'server', realSsh: 'C:\\x\\\u202essh.exe\u001b[2J', remotePid: 4242, via: null, reported: null }
+  expect(winAskSource(winRequest({ client: { pid: 1, exe: SHIM }, relay }), HELPER, SHIM)).toEqual({
+    kind: 'relay',
+    host: 'server',
+    realSsh: 'C:\\x\\ssh.exe[2J',
+  })
 })
 
 test('winRequester names the process that Asked by names', () => {

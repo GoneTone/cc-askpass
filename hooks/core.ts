@@ -121,16 +121,31 @@ export function parseWinLine(line: string): WinRequest | { gone: number } | null
     return null
   }
   if (typeof value?.gone === 'number') return { gone: value.gone }
+  const { parent, relay, ancestors } = value ?? {}
   const isRequest =
     Number.isInteger(value?.id) &&
-    typeof value.client?.pid === 'number' &&
-    typeof value.client.exe === 'string' &&
-    typeof value.prompt === 'string' &&
-    Array.isArray(value.ancestors)
+    isNumber(value.client?.pid) &&
+    isString(value.client.exe) &&
+    isString(value.prompt) &&
+    (parent === null || (isNumber(parent?.pid) && isString(parent.exe) && isString(parent.args))) &&
+    (relay === null ||
+      (isString(relay?.host) &&
+        isString(relay.realSsh) &&
+        isNumber(relay.remotePid) &&
+        isStringOrNull(relay.via) &&
+        isStringOrNull(relay.reported))) &&
+    Array.isArray(ancestors) &&
+    ancestors.every(ancestor => isNumber(ancestor?.pid) && isString(ancestor.args))
   return isRequest ? (value as WinRequest) : null
 }
 
-const isSamePath = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()
+const isNumber = (value: unknown): value is number => typeof value === 'number'
+const isString = (value: unknown): value is string => typeof value === 'string'
+const isStringOrNull = (value: unknown): value is string | null => value === null || isString(value)
+
+// Windows paths ignore case and take either slash.
+const isSamePath = (a: string, b: string): boolean =>
+  a.replaceAll('/', '\\').toLowerCase() === b.replaceAll('/', '\\').toLowerCase()
 
 /**
  * Who a Windows request says asked: through our helper, the program that started it; through
@@ -138,14 +153,15 @@ const isSamePath = (a: string, b: string): boolean => a.toLowerCase() === b.toLo
  */
 export function winAskSource(request: WinRequest, helperExe: string, shimExe: string): AskSource {
   const { client, parent, relay } = request
+  // File names may hold bidi and format characters: a path shown to expose a program must not
+  // disguise it. The host comes from the wrapper's arguments, which Claude chose.
   if (isSamePath(client.exe, helperExe)) {
-    return parent === null ? { kind: 'unverified', exe: null } : { kind: 'program', exe: parent.exe }
+    return parent === null ? { kind: 'unverified', exe: null } : { kind: 'program', exe: stripControl(parent.exe) }
   }
-  // The host comes from the wrapper's arguments, which Claude chose: it may not drive the terminal.
   if (isSamePath(client.exe, shimExe) && relay !== null) {
-    return { kind: 'relay', host: stripControl(relay.host), realSsh: relay.realSsh }
+    return { kind: 'relay', host: stripControl(relay.host), realSsh: stripControl(relay.realSsh) }
   }
-  return { kind: 'unverified', exe: client.exe }
+  return { kind: 'unverified', exe: stripControl(client.exe) }
 }
 
 /**
@@ -160,7 +176,7 @@ export function winRequester(request: WinRequest, helperExe: string, shimExe: st
   return {
     pid: asker.pid,
     isSudo: false,
-    comm: (asker.exe.split(/[\\/]/).at(-1) ?? '').replace(/\.exe$/i, '') || 'unknown program',
+    comm: (stripControl(asker.exe).split(/[\\/]/).at(-1) ?? '').replace(/\.exe$/i, '') || 'unknown program',
     command: args.length > MAX_COMMAND_LENGTH ? `${args.slice(0, MAX_COMMAND_LENGTH)}…` : args,
     askedBy,
   }

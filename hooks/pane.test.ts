@@ -366,6 +366,14 @@ test('a request not from our helper shows as unverified', async ($, on) => {
   expect(w.replies().map(reply => reply.argv.at(-1))).toEqual([`${SESSION_DIR}/reply.6666`])
 })
 
+test('a local prompt loses its control characters', async ($, on) => {
+  const w = await world($, on)
+  await w.request(6666, 6000, 'Pass\u001b[2Jword: ', SUDO_PARENT, { helperArgs: '/bin/sh /tmp/evil.sh x' })
+  const ui = await w.mount('terminal')
+  expect(await ui.find({ type: 'Text', text: /^Pass\[2Jword$/ })).toBeDefined()
+  expect(JSON.stringify(await ui.drawn()).includes('\\u001b')).toBe(false)
+})
+
 test('a failing ps check toasts and answers empty', async ($, on) => {
   const w = await world($, on)
   w.breakPs()
@@ -837,6 +845,16 @@ async function winWorld($: any, on: any) {
       serve.emit(`{"gone":${id}}\n`)
       await clock.settle()
     },
+    async stop() {
+      serve.end()
+      await clock.settle()
+    },
+    /** session.start again: a new listener, ready with `token`. */
+    async restart(token: string) {
+      await $.session.start(START)
+      serve.emit(`ready\t${WIN_PIPE}\t${token}\n`)
+      await clock.settle()
+    },
     /** Claude starts a PowerShell call that runs until `end` is called. */
     async powerShell(command: string) {
       // A call still running when the test ends is dropped with it.
@@ -936,6 +954,33 @@ test('gone skips a queued request', async ($, on) => {
   await ui.press({ key: 'cancel' })
   await w.clock.settle()
   expect(w.rec.opens).toHaveLength(1)
+})
+
+test('a Windows listener that ends closes its pane and drops the queue', async ($, on) => {
+  const w = await winWorld($, on)
+  await w.request(1)
+  await w.request(2)
+  await w.stop()
+  expect(w.rec.closes).toContain('askpass')
+  expect(w.rec.opens).toHaveLength(1)
+  await w.clock.advance(2000)
+  expect(w.rec.opens).toHaveLength(1)
+  expect(w.replies()).toEqual([])
+})
+
+test('a restarted Windows listener drops the old requests', async ($, on) => {
+  const w = await winWorld($, on)
+  await w.request(1, { prompt: 'old: ' })
+  const token = 'f'.repeat(32)
+  await w.restart(token)
+  expect(w.rec.closes).toContain('askpass')
+  // The new listener numbers from 1 again: its request 1 is a different one, and alive.
+  await w.request(1, { prompt: 'new: ' })
+  const ui = await w.mount()
+  expect(await ui.find({ type: 'Text', text: /^new$/ })).toBeDefined()
+  await ui.input({ key: await passwordKey(ui), text: 'x' })
+  await w.clock.settle()
+  expect(w.replies().map(reply => reply.stdin)).toEqual([`${token}\t1\nx\n`])
 })
 
 test('Claude ran from a single PowerShell call', async ($, on) => {
