@@ -251,7 +251,7 @@ relay_loop() {
     [ "$line" = stop ] && return 0
     pid=${line%%"$tab"*}
     case $pid in '' | *[!0-9]*) continue ;; esac
-    printf '%s\n' "$line"
+    printf '%s\n' "$line" || return 0
   done
 }
 
@@ -305,9 +305,11 @@ answers() {
 serve_stdin() {
   token=$1
   host=$(uname -n)
-  dir=
+  dir= reader=
   trap 'kill "$reader" 2> /dev/null; [ -z "$dir" ] || rm -rf "$dir"' EXIT
+  # A closed stdout must end the relay loop, not the shell before its cleanup.
   trap 'exit 0' HUP TERM
+  trap '' PIPE
   case $token in '' | *[!0-9a-f]*) ;; *) choose_dir ;; esac
   if [ -z "$dir" ] || ! { IFS=' ' read -r askpass_b64 ssh_b64 &&
     install_files "$askpass_b64" "$ssh_b64" "$CCAP_RS_B64"; }; then

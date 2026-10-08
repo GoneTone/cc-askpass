@@ -487,6 +487,24 @@ status=$?
 [ "$status" = 1 ] && [ "$(cat "$tmp/out")" = cc-askpass-failed ] || fail "status $status out: $(cat "$tmp/out")"
 teardown
 
+setup 'serve-stdin cleans up when its stdout is gone'
+tok=0123456789abcdef
+mkdir "$tmp/base"
+mkfifo "$tmp/in" "$tmp/outp"
+CCAP_TEST_BASES="$tmp/base" CCAP_RS_B64=$(base64 < "$root/bin/remote.sh" | tr -d '\n') \
+  sh "$root/bin/remote.sh" serve-stdin "$tok" < "$tmp/in" > "$tmp/outp" 2> "$tmp/err" &
+serve_pid=$!
+exec 5> "$tmp/in"
+sdir=$tmp/base/cc-askpass-$tok
+printf 'YQ== YQ==\n' >&5
+read -r line < "$tmp/outp"
+# The reader has hung up: the next request line cannot be written.
+printf '1\tP\t\t\n' > "$sdir/req"
+exec 5>&-
+await '[ ! -d "$sdir" ]' || fail 'directory still there'
+wait "$serve_pid" || fail "status $?"
+teardown
+
 setup 'run uses the prepared directory'
 serve_up
 got=$(CCAP_DIR=$sdir CCAP_CMD_B64=$(printf 'echo "$SUDO_ASKPASS"' | base64) sh "$root/bin/remote.sh" run)
