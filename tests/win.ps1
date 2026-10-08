@@ -119,7 +119,7 @@ function Test([string]$name, [scriptblock]$body) {
 
 # A fake real ssh for the wrapper: it appends its arguments as one JSON line to FAKE_SSH_LOG and
 # plays the relay connection R (serve-stdin), the command connection C (remote.sh run) or a plain
-# ssh as FAKE_SSH_MODE says: record, silent, relay or sleep.
+# ssh as FAKE_SSH_MODE says: record, silent, relay, sleep or deaf.
 $fakeSource = @'
 using System;
 using System.IO;
@@ -172,6 +172,7 @@ public static class FakeSsh
         }
         if (all.Contains("remote.sh run"))
         {
+            if (mode == "deaf") return 5;
             if (mode != "relay") Thread.Sleep(Timeout.Infinite);
             // Ends once R's stdin got the answer.
             for (int i = 0; i < 300; i++)
@@ -211,6 +212,9 @@ function Get-Runs($program) {
   # The comma keeps a one-line array an array.
   if (Test-Path -LiteralPath $program.Log) { ,@(Get-Content -LiteralPath $program.Log -Encoding UTF8) } else { ,@() }
 }
+
+# Runs for a failure message, without most of the base64.
+function Get-Short($runs) { $text = "$runs"; if ($text.Length -gt 300) { $text.Substring(0, 300) + '...' } else { $text } }
 
 function Test-Argv([string]$run, [string[]]$want) {
   $got = @(($run | ConvertFrom-Json).argv)
@@ -427,6 +431,11 @@ try {
       @('no', @{}, @('-s', 'h', 'sftp')),
       @('no', @{}, @('-f', 'h', 'cmd')),
       @('no', @{}, @('-Z', 'h', 'cmd')),
+      @('no', @{}, @('-o', 'ForkAfterAuthentication=YES', 'h', 'sudo', 'true')),
+      @('no', @{}, @('h', '-o', 'StdinNull yes', 'sudo', 'true')),
+      @('no', @{}, @('-o', 'sessiontype=none', 'h', 'sudo', 'true')),
+      @('wrap', @{}, @('-o', 'SessionType=default', 'h', 'sudo', 'true')),
+      @('wrap', @{}, @('-o', 'StdinNull=no', 'h', 'sudo', 'true')),
       @('no', @{}, @('git@github.com', 'git-upload-pack', 'a/b.git'))
     )
     foreach ($case in $cases) {
@@ -437,16 +446,16 @@ try {
       $label = "$want for $($argv -join ' ')"
       Check ($result.Code -eq 7 -and $result.Out -ceq "fake-out`n") "${label}: exited $($result.Code), stdout '$($result.Out)', stderr '$($result.Err)'"
       if ($want -eq 'wrap') {
-        Check ($all.Count -eq 2 -and $all[0] -match 'serve-stdin') "${label}: no relay connection first: $all"
+        Check ($all.Count -eq 2 -and $all[0] -match 'serve-stdin') "${label}: no relay connection first: $(Get-Short $all)"
       } else {
-        Check ($all.Count -eq 1) "${label}: $($all.Count) runs: $all"
+        Check ($all.Count -eq 1) "${label}: $($all.Count) runs: $(Get-Short $all)"
       }
       Check (Test-Argv $all[-1] $argv) "${label}: the real ssh got $($all[-1])"
     }
   }
 
   Test 'arguments reach the real ssh unchanged' {
-    $argv = @('-o', 'User a b', 'h', '*', '', 'a\\"b', 'trailing\\')
+    $argv = @('-o', 'User a b', 'h', '*', '', 'a\\"b', 'trailing\\', 'a\\b', 'C:\\x\\y', "ls`n")
     $run = Start-Wrapper $argv
     $result = Wait-Program $run
     $all = Get-Runs $run
@@ -502,16 +511,22 @@ try {
     $all = Get-Runs $run
     $r = @(($all[0] | ConvertFrom-Json).argv)
     # ssh joins the words of the remote command with spaces: A's one-line bootstrap shape.
-    Check (($r -join ' ') -cmatch "^-T -- server env CCAP_RS_B64=[A-Za-z0-9+/=]+ /bin/sh -c 'eval .*' _ serve-stdin [0-9a-f]{32}$") "R ran $($all[0])"
+    Check (($r -join ' ') -cmatch "^-o ClearAllForwardings=yes -x -a -T -- server env CCAP_RS_B64=[A-Za-z0-9+/=]+ /bin/sh -c 'eval .*' _ serve-stdin [0-9a-f]{32}$") "R ran $($all[0])"
     $b64 = [Convert]::ToBase64String($utf8.GetBytes('sudo true'))
     $c = @(($all[1] | ConvertFrom-Json).argv)
     Check ($c.Count -eq 7 -and $c[0] -ceq 'server' -and ($c[1..6] -join ' ') -cmatch "^env CCAP_DIR=(/tmp/cc-askpass-[0-9a-f]{32}) CCAP_CMD_B64=$([regex]::Escape($b64)) /bin/sh \1/remote.sh run$") "C ran $($all[1])"
   }
 
-  Test 'killing the wrapper ends both connections' {
-    $run = Start-Wrapper @('h', 'sleep', '60') @{ FAKE_SSH_MODE = 'sleep' }
+  Test 'killing the wrapper ends both connections; only C forwards' {
+    $run = Start-Wrapper @('-L', '1:h:2', 'h', 'sleep', '60') @{ FAKE_SSH_MODE = 'sleep' }
     for ($i = 0; $i -lt 100 -and (Get-Runs $run).Count -lt 2; $i++) { Start-Sleep -Milliseconds 100 }
-    Check ((Get-Runs $run).Count -eq 2) "C did not start: $(Get-Runs $run)"
+    $all = Get-Runs $run
+    Check ($all.Count -eq 2) "C did not start: $all"
+    # R would take C's forwards (and those of the config) first: C's own would not bind.
+    $r = @(($all[0] | ConvertFrom-Json).argv)
+    Check (($r -join ' ') -clike '-o ClearAllForwardings=yes -L 1:h:2 -x -a -T -- h env *') "R ran $($all[0])"
+    $c = @(($all[1] | ConvertFrom-Json).argv)
+    Check (($c[0..2] -join ' ') -ceq '-L 1:h:2 h') "C ran $($all[1])"
     $run.P.Kill()
     $deadline = (Get-Date).AddSeconds(2)
     do {
@@ -522,10 +537,58 @@ try {
     Check ($left.Count -eq 0) "$($left.Count) fake ssh processes are left"
   }
 
+  Test 'an R that stops reading cannot hold the wrapper' {
+    # R says ready but never reads its stdin, so the payload write blocks; C ends at once.
+    $run = Start-Wrapper @('h', 'true') @{ FAKE_SSH_MODE = 'deaf' }
+    $result = Wait-Program $run 10000
+    Check ($result.Code -eq 5) "exited $($result.Code): $($result.Err)"
+  }
+
   Test 'no real ssh fails with 255' {
     $result = Wait-Program (Start-Wrapper @('h', 'true') @{ PATH = "$shim;$env:SystemRoot\System32" })
     Check ($result.Code -eq 255) "exited $($result.Code)"
     Check ($result.Err.Trim() -ceq 'cc-askpass: ssh: command not found') "stderr is '$($result.Err)'"
+  }
+
+  # An MSYS ssh (Git's) reads its command line itself: a stand-in is Git's echo.exe with the DLLs
+  # it needs, which prints its arguments joined by spaces, as ssh joins a remote command.
+  $gitBin = Join-Path $env:ProgramFiles 'Git\usr\bin'
+  if (Test-Path -LiteralPath (Join-Path $gitBin 'msys-2.0.dll')) {
+    $msysbin = Join-Path $tmp 'msysbin'
+    $null = New-Item -ItemType Directory $msysbin
+    Copy-Item -LiteralPath (Join-Path $gitBin 'echo.exe') -Destination (Join-Path $msysbin 'ssh.exe')
+    foreach ($dll in 'msys-2.0.dll', 'msys-intl-8.dll', 'msys-iconv-2.dll') {
+      Copy-Item -LiteralPath (Join-Path $gitBin $dll) -Destination $msysbin
+    }
+    $msysVars = @{ PATH = "$shim;$msysbin"; CC_ASKPASS_WRAP = $null }
+
+    Test 'an MSYS ssh gets backslashes and quotes intact' {
+      # Not \\server\share: MSYS looks such a word up on the network as it starts (seconds for no server).
+      $argv = @('h', 'a\\b', 'C:\\x\\y', 'x\\\y\\', 'q"uo\"te', 'it''s *', "ls`n")
+      $result = Wait-Program (Start-Wrapper $argv $msysVars)
+      Check ($result.Out -ceq (($argv -join ' ') + "`n")) "echo printed '$($result.Out)': $($result.Err)"
+    }
+
+    Test 'a long remote command reaches an MSYS ssh whole' {
+      # Many short pieces; and a long space-free run that may go bare inside a word that may not.
+      foreach ($command in ('ab\c "d" ' * 2000).TrimEnd(), ('printf %s ' + ('x' * 9000) + ' | wc -c')) {
+        $run = Start-Wrapper @('h', $command) $msysVars
+        # Read while it runs: the output is more than a pipe holds.
+        $out = $run.P.StandardOutput.ReadToEndAsync()
+        Check ($run.P.WaitForExit(10000) -and $out.Wait(5000)) 'the wrapper did not end'
+        Check ($run.P.ExitCode -eq 0 -and $out.Result -ceq "h $command`n") "echo printed $($out.Result.Length) characters: $(Get-Stderr $run)"
+      }
+    }
+
+    Test 'an argument too long for an MSYS ssh runs nothing' {
+      foreach ($argv in @(@('h', (('x' * 9000) + '*')), @('-o', ('User=' + ('y' * 9000) + '*'), 'h', 'true'))) {
+        $result = Wait-Program (Start-Wrapper $argv $msysVars)
+        Check ($result.Code -eq 255 -and $result.Out -ceq '') "exited $($result.Code) with '$($result.Out)'"
+        Check ($result.Err -match 'too long.*nothing was run') "stderr is '$($result.Err)'"
+      }
+    }
+  } else {
+    'SKIP: no Git for Windows MSYS runtime, so no MSYS ssh tests'
   }
 
   # Optional: CC_ASKPASS_TEST_SSH names a reachable host with key login, e.g.

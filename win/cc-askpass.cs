@@ -5,6 +5,7 @@
 //   ssh.exe <ssh arguments>             the ssh wrapper (shim\ssh.exe)
 // Built by win/build.ps1 with Windows PowerShell's Add-Type: C# 5 on .NET Framework 4.x.
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -130,23 +131,22 @@ static class Native
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
 
-    // A job whose processes end when its last handle closes: never closed here, so with this process.
-    // The handle is not inheritable, so no child keeps the job alive.
-    public static IntPtr KillOnCloseJob()
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+
+    // Puts this process into a job whose processes all end when its last handle closes, so every
+    // child is born inside it. The handle is never closed here (it goes with this process) and is
+    // not inheritable, so no child keeps the job alive. False (Windows error in error) on failure.
+    public static bool EnterKillOnCloseJob(out int error)
     {
         IntPtr job = CreateJobObjectW(IntPtr.Zero, IntPtr.Zero);
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
         info.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if (job != IntPtr.Zero)
-            SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref info, Marshal.SizeOf(info));
-        return job;
-    }
-
-    // ponytail: a child that starts a process before it joins escapes the job; CREATE_SUSPENDED
-    // through CreateProcessW would close that gap if ssh ever proves that fast.
-    public static void Join(IntPtr job, Process process)
-    {
-        if (job != IntPtr.Zero) AssignProcessToJobObject(job, process.Handle);
+        bool ok = job != IntPtr.Zero &&
+            SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref info, Marshal.SizeOf(info)) &&
+            AssignProcessToJobObject(job, GetCurrentProcess());
+        error = ok ? 0 : Marshal.GetLastWin32Error();
+        return ok;
     }
 
     // A pipe instance only the current user can open; `first` fails while any instance of the name exists.
@@ -441,10 +441,16 @@ sealed class SshArgs
         if ("SMtTn".IndexOf(opt) >= 0) return;
         if (opt == 'o')
         {
-            // "Key=value" or "Key value", the key in any case.
-            string key = value.Split('=', ' ')[0];
-            if (key.Equals("ControlPath", StringComparison.OrdinalIgnoreCase) ||
-                key.Equals("ControlMaster", StringComparison.OrdinalIgnoreCase)) return;
+            // "Key=value", "Key value" or "Key = value", the key and value in any case.
+            int cut = value.IndexOfAny(new char[] { '=', ' ', '\t' });
+            string key = (cut < 0 ? value : value.Substring(0, cut)).ToLowerInvariant();
+            string setting = cut < 0 ? "" : value.Substring(cut).TrimStart('=', ' ', '\t').TrimEnd().ToLowerInvariant();
+            bool yes = setting == "yes" || setting == "true";
+            // The -f, -n and -N/-s of a config line: a child forked past the wrapper would die with
+            // its job, and a session without stdin or a command has no prompt to relay.
+            if ((key == "forkafterauthentication" || key == "stdinnull") && yes ||
+                key == "sessiontype" && (setting == "none" || setting == "subsystem")) PassFlag = true;
+            if (key == "controlpath" || key == "controlmaster") return;
         }
         RelayOptions.Add("-" + opt);
         if (value != null) RelayOptions.Add(value);
@@ -459,6 +465,10 @@ static class SshWrapper
     const int CommandLineMax = 32767;
     // The longest token directory accepted from the remote, so C's length is known beforehand.
     const int DirMax = 256;
+    // Git's ssh (MSYS) cuts a quoted word from a Windows program at this many UTF-16 units.
+    const int MsysWordMax = 8186;
+    // The real ssh is an MSYS or Cygwin program, which reads its command line itself.
+    static bool msys;
     const string Eval = "eval \"$(printf %s \"$CCAP_RS_B64\" | base64 -d 2>/dev/null || printf %s \"$CCAP_RS_B64\" | base64 -D)\"";
 
     public static int Run(string self, string[] args)
@@ -470,7 +480,12 @@ static class SshWrapper
             Console.Error.WriteLine("cc-askpass: ssh: command not found");
             return 255;
         }
+        string sshDir = Path.GetDirectoryName(realSsh);
+        msys = File.Exists(Path.Combine(sshDir, "msys-2.0.dll")) || File.Exists(Path.Combine(sshDir, "cygwin1.dll"));
         SshArgs parsed = new SshArgs(args);
+        // R and C pass on only words of these (or shorter, or base64): they fit when these fit.
+        List<string> words = msys ? MsysWords(args, parsed.CommandStart) : new List<string>(args);
+        if (words == null) return 255;
         if (ShouldWrap(parsed, Path.Combine(Path.GetDirectoryName(shimDir), "cc-askpass.exe")))
         {
             int? status = Wrap(realSsh, args, parsed, shimDir);
@@ -478,7 +493,7 @@ static class SshWrapper
         }
         try
         {
-            using (Process ssh = Start(realSsh, new List<string>(args), false))
+            using (Process ssh = Start(realSsh, words, false))
             {
                 ssh.WaitForExit();
                 return ssh.ExitCode;
@@ -533,7 +548,8 @@ static class SshWrapper
         string name = HostName(args.Host);
         if (IsExcluded(name)) return false;
         // The name goes into the request lines, where the mod shows it.
-        if (!Regex.IsMatch(name, "^[A-Za-z0-9._@:%-]+$")) return false;
+        // \z, not $: $ also matches before a final \n.
+        if (!Regex.IsMatch(name, @"\A[A-Za-z0-9._@:%-]+\z")) return false;
         string pipe = Pipes.Name();
         if (string.IsNullOrEmpty(pipe)) return false;
         using (NamedPipeClientStream listener = Pipes.Connect(pipe, 1000)) return listener != null;
@@ -610,7 +626,7 @@ static class SshWrapper
             }
             try
             {
-                if (Regex.IsMatch(name, regex.Append('$').ToString(), RegexOptions.Singleline)) return true;
+                if (Regex.IsMatch(name, regex.Append(@"\z").ToString(), RegexOptions.Singleline)) return true;
             }
             catch (ArgumentException)
             {
@@ -621,13 +637,22 @@ static class SshWrapper
         return false;
     }
 
-    // The standard Windows quoting (CommandLineToArgvW and the C runtime). Git's ssh, an MSYS
-    // program, also reads the line itself: it expands wildcards, ~, {} and @file in unquoted words
-    // and honours ' quotes, so every word is quoted unless it is plain characters (base64, our
-    // own words), but it cuts a quoted word at 8,186 characters, so a plain one stays bare.
+    // A word both command-line parsers read the same bare: no wildcard, blank, quote, backslash,
+    // ~, {} or @. \z, not $: $ also matches before a final \n.
+    static bool IsPlain(string word)
+    {
+        return Regex.IsMatch(word, @"\A[A-Za-z0-9+/=._,:%-]+\z");
+    }
+
+    // Every word quoted unless it is plain (base64, our own words). An MSYS or Cygwin program reads
+    // the line itself: it expands wildcards, ~, {} and @file in unquoted words and honours '
+    // quotes; inside "..." it reads \\ as \ and \" as " (any other \ stays) and cuts the word at
+    // MsysWordMax, so a plain one stays bare. Anything else gets the standard Windows quoting
+    // (CommandLineToArgvW and the C runtime).
     public static string QuoteArg(string arg)
     {
-        if (Regex.IsMatch(arg, "^[A-Za-z0-9+/=._,:%-]+$")) return arg;
+        if (IsPlain(arg)) return arg;
+        if (msys) return "\"" + arg.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
         StringBuilder quoted = new StringBuilder("\"");
         int slashes = 0;
         foreach (char c in arg)
@@ -641,6 +666,43 @@ static class SshWrapper
             slashes = 0;
         }
         return quoted.Append('\\', slashes * 2).Append('"').ToString();
+    }
+
+    // args for an MSYS ssh with no quoted word over MsysWordMax: a long remote-command word is split
+    // at spaces into pieces packed up to that length, a long plain piece going bare on its own (ssh
+    // joins the words of the remote command with spaces again, so nothing changes). Null, with a
+    // message, when a word cannot be split so: nothing may run cut short.
+    static List<string> MsysWords(string[] args, int commandStart)
+    {
+        List<string> words = new List<string>();
+        for (int i = 0; i < args.Length; i++)
+        {
+            if (args[i].Length <= MsysWordMax || IsPlain(args[i]))
+            {
+                words.Add(args[i]);
+                continue;
+            }
+            StringBuilder piece = null;
+            foreach (string token in i >= commandStart ? args[i].Split(' ') : new string[] { args[i] })
+            {
+                if (token.Length > MsysWordMax && !IsPlain(token))
+                {
+                    Console.Error.WriteLine("cc-askpass: ssh: an argument of " + args[i].Length +
+                        " characters is too long: the real ssh, an MSYS program, would get it cut at " + MsysWordMax +
+                        " (a remote command may be longer where it has spaces); nothing was run");
+                    return null;
+                }
+                if (piece != null && piece.Length + 1 + token.Length <= MsysWordMax)
+                {
+                    piece.Append(' ').Append(token);
+                    continue;
+                }
+                if (piece != null) words.Add(piece.ToString());
+                piece = new StringBuilder(token);
+            }
+            words.Add(piece.ToString());
+        }
+        return words;
     }
 
     static Process Start(string exe, List<string> args, bool redirect)
@@ -683,7 +745,7 @@ static class SshWrapper
         const string prefix = "cc-askpass-ready ";
         if (line == null || !line.StartsWith(prefix, StringComparison.Ordinal)) return null;
         string dir = line.Substring(prefix.Length);
-        return dir.Length <= DirMax && Regex.IsMatch(dir, "^/[A-Za-z0-9._/+@-]*/cc-askpass-" + token + "$") ? dir : null;
+        return dir.Length <= DirMax && Regex.IsMatch(dir, @"\A/[A-Za-z0-9._/+@-]*/cc-askpass-" + token + @"\z") ? dir : null;
     }
 
     static int ReadyMs()
@@ -726,9 +788,15 @@ static class SshWrapper
         commandArgs.AddRange(RunWords(new string('x', DirMax), commandB64));
         if (QuoteArg(realSsh).Length + 1 + string.Join(" ", commandArgs.ConvertAll(QuoteArg)).Length >= CommandLineMax) return null;
 
-        IntPtr job = Native.KillOnCloseJob();
-        List<string> relayArgs = new List<string>(parsed.RelayOptions);
-        relayArgs.AddRange(new string[] { "-T", "--", parsed.Host });
+        int jobError;
+        if (!Native.EnterKillOnCloseJob(out jobError))
+            Console.Error.WriteLine("cc-askpass: could not set up a job object (Windows error " + jobError +
+                "); ssh processes may outlive an interrupted command");
+        // R forwards nothing (C's own forwards would not bind) and never has a terminal (one would
+        // echo the answer back as a request line). The first -o wins; -x -a -T win after the caller's.
+        List<string> relayArgs = new List<string> { "-o", "ClearAllForwardings=yes" };
+        relayArgs.AddRange(parsed.RelayOptions);
+        relayArgs.AddRange(new string[] { "-x", "-a", "-T", "--", parsed.Host });
         relayArgs.AddRange(remoteWords);
         Process relay;
         try
@@ -739,13 +807,14 @@ static class SshWrapper
         {
             return null;
         }
-        Native.Join(job, relay);
 
-        // The wrapper is R's only stdin writer: the payload, then one answer per request.
+        // R's stdin has one writer thread, fed in order: the payload, then one answer per request.
+        // ssh reads its stdin only once logged in, which may take a typed password, and a stalled
+        // R may never read it again: nobody else ever waits on a write.
         Stream relayIn = relay.StandardInput.BaseStream;
-        object inLock = new object();
-        // ssh reads its stdin only once logged in, which may take a typed password: no wait here.
-        Background(delegate { Send(relayIn, inLock, payload); });
+        BlockingCollection<byte[]> toRelay = new BlockingCollection<byte[]>();
+        toRelay.Add(payload);
+        Background(delegate { Write(relayIn, toRelay); });
         string dir = null;
         try
         {
@@ -773,14 +842,14 @@ static class SshWrapper
             Kill(relay);
             return null;
         }
-        Native.Join(job, command);
         string name = HostName(parsed.Host);
-        Background(delegate { Relay(relay, relayIn, inLock, realSsh, name); });
+        Background(delegate { Relay(relay, toRelay, realSsh, name); });
 
         command.WaitForExit();
         int status = command.ExitCode;
-        // EOF ends R: remote.sh removes the token directory and exits.
-        lock (inLock) relayIn.Dispose();
+        // The writer then closes R's stdin, and EOF ends R: remote.sh removes the token directory
+        // and exits. A writer stuck on R leaves R to the job, which ends it with this process.
+        toRelay.CompleteAdding();
         relay.WaitForExit(5000);
         return status;
     }
@@ -792,19 +861,27 @@ static class SshWrapper
         thread.Start();
     }
 
-    static void Send(Stream relayIn, object inLock, byte[] bytes)
+    static void Write(Stream relayIn, BlockingCollection<byte[]> queue)
     {
-        lock (inLock)
+        try
         {
-            try
+            foreach (byte[] bytes in queue.GetConsumingEnumerable())
             {
                 relayIn.Write(bytes, 0, bytes.Length);
                 relayIn.Flush();
             }
-            catch (IOException)
+        }
+        catch (IOException)
+        {
+            // R is gone.
+        }
+        finally
+        {
+            try
             {
+                relayIn.Dispose();
             }
-            catch (ObjectDisposedException)
+            catch (IOException)
             {
             }
         }
@@ -812,7 +889,7 @@ static class SshWrapper
 
     // Each request line R prints (A §4.6) goes to the listener as a relay request; the answer goes
     // back to R as <remote pid>\t<answer>\n, an empty one when nobody answers.
-    static void Relay(Process relay, Stream relayIn, object inLock, string realSsh, string host)
+    static void Relay(Process relay, BlockingCollection<byte[]> toRelay, string realSsh, string host)
     {
         string pipe = Pipes.Name();
         try
@@ -849,7 +926,8 @@ static class SshWrapper
                 reply.Write(head, 0, head.Length);
                 reply.Write(answer, 0, answer.Length);
                 reply.WriteByte((byte)'\n');
-                Send(relayIn, inLock, reply.ToArray());
+                // Refused once the command has ended: the catch below ends this thread.
+                toRelay.Add(reply.ToArray());
             }
         }
         catch (Exception)
