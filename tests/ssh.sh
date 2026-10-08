@@ -679,7 +679,7 @@ sample_argv() {
 
 run_e2e() {
   cfg=$e2e/a/cfg
-  # ssh-add is a client the remote relay lets through (root-owned, named like the process);
+  # ssh-add asks through the remote askpass like any program (who asks is shown, not judged);
   # the key's passphrase is the listener's answer.
   add="eval \"\$(ssh-agent -s)\" > /dev/null; trap \"ssh-agent -k > /dev/null\" EXIT; ssh-add $e2e/pw_key 2> /dev/null && ssh-add -l > /dev/null && echo added"
 

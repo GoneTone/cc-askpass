@@ -206,7 +206,7 @@ should_wrap() {
   [ -z "$spaced" ] || return 1
   is_protocol_command && return 1
   is_excluded && return 1
-  # The name goes into the relay's args and the request lines, where the mod checks it.
+  # The name goes into the relay's args and the request lines, where the mod shows it.
   case $name in '' | *[!A-Za-z0-9._@:%-]*) return 1 ;; esac
   return 0
 }
@@ -325,7 +325,7 @@ wrap() {
     relay_fifo=$CC_ASKPASS_DIR/r.$$
     rm -f "$relay_fifo"
     if [ "${#line}" -le 120000 ] && mkfifo "$relay_fifo"; then
-      # Both are our children: the mod checks that the relay's parent is this wrapper.
+      # Both are our children; the relay's args (this file --relay <host>) are what `Asked by:` shows.
       mux -T "$host" "$(remote_line '' relay "$token")" < /dev/null > "$relay_fifo" 2> /dev/null &
       relay_ssh_pid=$!
       # With the caller's PATH, so the relay finds the same real ssh.
@@ -413,7 +413,7 @@ find_real_ssh
 # user's ProxyCommand and the like) still gets the caller's PATH.
 user_path=$PATH
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
-# The mod checks a remote request's helper by its parent's args: an absolute path to this file.
+# `Asked by:` shows a remote request's relay by its args, which hold an absolute path to this file.
 self=$0
 case $self in /*) ;; *) self=$(pwd)/$self ;; esac
 # bin/shim/ssh next to bin/remote.sh and bin/askpass, or all three in a remote token directory.

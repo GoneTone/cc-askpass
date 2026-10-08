@@ -16,7 +16,7 @@ sudo: a password is required
 結果只好把指令複製到自己的終端機執行，再把結果告訴 Claude。其他繞路方法風險更高：把密碼貼進對話讓 Claude 用 `sudo -S`，密碼就進了模型的 context；在 sudoers 設定 `NOPASSWD`，則任何東西都能不經詢問就以 root 執行。
 
 - **不用設定。** 裝好之後，sudo、ssh 和 git 需要密碼時就會直接問你。
-- **密碼不經過模型。** 密碼從面板經由私有的 FIFO 送到提出要求的程序，不會出現在模型的 context、log、命令列或任何檔案裡。
+- **密碼不經過模型。** 密碼從面板在 Linux 和 macOS 上經由私有的 FIFO、在 Windows 上經由私有的具名管道（named pipe）送到提出要求的程序，不會出現在模型的 context、log、命令列或任何檔案裡。
 - **看得到你在核准什麼。** 面板會顯示將以 root 執行的完整指令，以及 Claude 為此執行了哪個指令。
 - **看得到是誰在問。** 每個請求都會顯示，不會被默默拒絕。面板會標出提出要求的程式（`Asked by:`）和 Claude 執行的指令（`Claude ran:`），由你決定。
 

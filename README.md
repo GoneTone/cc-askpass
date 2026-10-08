@@ -16,7 +16,7 @@ sudo: a password is required
 So you end up copying the command into your own terminal, running it there and telling Claude how it went. The other ways around it are riskier: pasting the password into the chat for `sudo -S` puts it in the model's context, and `NOPASSWD` in sudoers lets anything run as root without asking.
 
 - **Nothing to configure.** Install it, and sudo, ssh and git simply ask.
-- **The password stays out of the model.** It travels from the pane to the asking process through a private FIFO, never through the model's context, logs, the command line or a file.
+- **The password stays out of the model.** It travels from the pane to the asking process through a private FIFO on Linux and macOS and a private named pipe on Windows, never through the model's context, logs, the command line or a file.
 - **You see what you are approving.** The pane shows the exact command that will run as root, and the command Claude ran to get there.
 - **You see who asks.** Every request is shown, none is silently rejected. The pane names the program that asked (`Asked by:`) and the command Claude ran (`Claude ran:`), and you decide.
 
