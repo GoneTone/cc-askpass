@@ -10,6 +10,16 @@
 #   reply <token> <pid>    Copy stdin (the answer) into the helper's reply FIFO.
 #   stop <token>           Hang up the bootstrap's process group: the wrapper was interrupted.
 #
+# Without connection multiplexing (Windows) two plain connections replace the bootstrap:
+#
+#   serve-stdin <token>    With CCAP_RS_B64 (this file) in the environment. Stdin line 1 is
+#                          "<askpass b64> <ssh wrapper b64>". Set up the token directory,
+#                          print "cc-askpass-ready <dir>" (or "cc-askpass-failed"), relay the
+#                          requests to stdout and write the stdin lines "<pid><TAB><password>"
+#                          into the helpers' reply FIFOs. Stdin EOF: clean up.
+#   run                    With CCAP_DIR (that directory) and CCAP_CMD_B64: run the command
+#                          with the remote askpass.
+#
 # It never writes to stdout except the relayed request lines; diagnostics go to stderr.
 
 me=cc-askpass
@@ -131,20 +141,13 @@ EOF
 
 # plain: run the command as ssh would have, without the mod.
 plain() {
-  unset CCAP_TOKEN CCAP_RS_B64 CCAP_ASKPASS_B64 CCAP_SSH_B64 CCAP_CMD_B64
+  unset CCAP_TOKEN CCAP_RS_B64 CCAP_ASKPASS_B64 CCAP_SSH_B64 CCAP_CMD_B64 CCAP_DIR
   exec "${SHELL:-/bin/sh}" -c "$cmd"
 }
 
-bootstrap() {
-  if ! cmd=$(decode "$CCAP_CMD_B64"); then
-    echo "$me: cannot decode the command" >&2
-    exit 255
-  fi
-  token=${CCAP_TOKEN:-}
-  case $token in '' | *[!0-9a-f]*) plain ;; esac
-  host=$(uname -n)
-
-  # The first base that is writable and lets us run what we put there.
+# choose_dir: set dir to a fresh token directory (owner.pid written) in the first base that is
+# writable and lets us run what we put there, or to nothing. Needs token and host.
+choose_dir() {
   dir=
   while IFS= read -r base; do
     [ -n "$base" ] && [ -d "$base" ] && [ -w "$base" ] || continue
@@ -161,25 +164,21 @@ bootstrap() {
   done << EOF
 $(bases)
 EOF
-  [ -n "$dir" ] || plain
+}
 
-  # The relay ends on a "stop" line: no pid to kill, nothing ps must find.
-  trap '[ -p "$dir/req" ] && printf "stop\n" 1<> "$dir/req"; rm -rf "$dir"' EXIT
-  # The wrapper's stop, or a hangup: end the command and whatever it started, as a hangup
-  # of a terminal would.
-  trap 'trap "" HUP INT TERM; kill -HUP 0 2> /dev/null; exit 129' HUP INT TERM
-  if ! { decode "$CCAP_ASKPASS_B64" > "$dir/askpass" &&
-    decode "$CCAP_SSH_B64" > "$dir/ssh" &&
-    decode "$CCAP_RS_B64" > "$dir/remote.sh" &&
+# install_files ASKPASS_B64 SSH_B64 RS_B64: fill dir.
+install_files() {
+  decode "$1" > "$dir/askpass" &&
+    decode "$2" > "$dir/ssh" &&
+    decode "$3" > "$dir/remote.sh" &&
     sudo_wrapper > "$dir/sudo" &&
     chmod 700 "$dir/askpass" "$dir/ssh" "$dir/sudo" &&
-    mkfifo "$dir/req"; }; then
-    echo "$me: cannot set up $dir; running without the pane" >&2
-    rm -rf "$dir"
-    trap - EXIT HUP INT TERM
-    plain
-  fi
-  unset CCAP_TOKEN CCAP_RS_B64 CCAP_ASKPASS_B64 CCAP_SSH_B64 CCAP_CMD_B64
+    mkfifo "$dir/req"
+}
+
+# run_command: run cmd the way ssh would, with the remote askpass in its environment.
+run_command() {
+  unset CCAP_TOKEN CCAP_RS_B64 CCAP_ASKPASS_B64 CCAP_SSH_B64 CCAP_CMD_B64 CCAP_DIR
   SUDO_ASKPASS=$dir/askpass
   SSH_ASKPASS=$dir/askpass
   SSH_ASKPASS_REQUIRE=force
@@ -189,15 +188,6 @@ EOF
   PATH=$dir:$PATH
   export SUDO_ASKPASS SSH_ASKPASS SSH_ASKPASS_REQUIRE CC_ASKPASS_DIR CC_ASKPASS_REMOTE CC_ASKPASS_WRAP PATH
 
-  # The relay starts alongside; a prompt before it listens would fail. Without it (sshd
-  # refused the session) the askpass fails with its own message.
-  i=0
-  while [ "$i" -lt 50 ]; do
-    IFS= read -r relay 2> /dev/null < "$dir/relay.pid" && kill -0 "$relay" 2> /dev/null && break
-    nap
-    i=$((i + step))
-  done
-
   # In the foreground, as ssh runs it: a background command would start with SIGINT and
   # SIGQUIT ignored. The wrapper's stop hangs up the whole process group. The shell reports a
   # command killed by a signal ("Hangup") on the stderr the command was given, and on a closed
@@ -206,6 +196,63 @@ EOF
   exec 4>&2 2> /dev/null
   (exec "${SHELL:-/bin/sh}" -c "$cmd" 2>&4 4>&-)
   exit "$?"
+}
+
+bootstrap() {
+  if ! cmd=$(decode "$CCAP_CMD_B64"); then
+    echo "$me: cannot decode the command" >&2
+    exit 255
+  fi
+  token=${CCAP_TOKEN:-}
+  case $token in '' | *[!0-9a-f]*) plain ;; esac
+  host=$(uname -n)
+  choose_dir
+  [ -n "$dir" ] || plain
+
+  # The relay ends on a "stop" line: no pid to kill, nothing ps must find.
+  trap '[ -p "$dir/req" ] && printf "stop\n" 1<> "$dir/req"; rm -rf "$dir"' EXIT
+  # The wrapper's stop, or a hangup: end the command and whatever it started, as a hangup
+  # of a terminal would.
+  trap 'trap "" HUP INT TERM; kill -HUP 0 2> /dev/null; exit 129' HUP INT TERM
+  if ! install_files "$CCAP_ASKPASS_B64" "$CCAP_SSH_B64" "$CCAP_RS_B64"; then
+    echo "$me: cannot set up $dir; running without the pane" >&2
+    rm -rf "$dir"
+    trap - EXIT HUP INT TERM
+    plain
+  fi
+
+  # The relay starts alongside; a prompt before it listens would fail. Without it (sshd
+  # refused the session) the askpass fails with its own message.
+  i=0
+  while [ "$i" -lt 50 ]; do
+    IFS= read -r relay 2> /dev/null < "$dir/relay.pid" && kill -0 "$relay" 2> /dev/null && break
+    nap
+    i=$((i + step))
+  done
+  run_command
+}
+
+# run: the command connection of a relay over a plain connection; serve-stdin made CCAP_DIR.
+run() {
+  if ! cmd=$(decode "$CCAP_CMD_B64"); then
+    echo "$me: cannot decode the command" >&2
+    exit 255
+  fi
+  dir=${CCAP_DIR:-}
+  case ${dir##*/} in $me-*) ;; *) plain ;; esac
+  [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] && [ -p "$dir/req" ] || plain
+  [ -n "$(find "$dir" -prune -perm 700 2> /dev/null)" ] || plain
+  run_command
+}
+
+# relay_loop: print the well-formed request lines from fd 3 until the "stop" line.
+relay_loop() {
+  while IFS= read -r line <&3; do
+    [ "$line" = stop ] && return 0
+    pid=${line%%"$tab"*}
+    case $pid in '' | *[!0-9]*) continue ;; esac
+    printf '%s\n' "$line"
+  done
 }
 
 relay() {
@@ -221,26 +268,63 @@ relay() {
   # Read-write so it never sees EOF; open before the bootstrap can see relay.pid and leave.
   exec 3<> "$dir/req"
   printf '%s\n' "$$" > "$dir/relay.pid"
-  while IFS= read -r line <&3; do
-    [ "$line" = stop ] && exit 0
-    pid=${line%%"$tab"*}
-    case $pid in '' | *[!0-9]*) continue ;; esac
-    printf '%s\n' "$line"
-  done
+  relay_loop
 }
 
-# The same checks as REPLY_SCRIPT in hooks/register.tsx, on this host.
+# open_reply FIFO: the same checks as REPLY_SCRIPT in hooks/register.tsx, on this host; fd 3
+# is then the helper's reply FIFO.
+open_reply() {
+  [ -p "$1" ] || return 1
+  exec 3<> "$1"
+  [ -p /dev/fd/3 ] || {
+    rm -f "$1"
+    return 1
+  }
+}
+
 reply() {
   case $2 in '' | *[!0-9]*) exit 1 ;; esac
   find_dir "$1" || exit 1
-  fifo=$dir/reply.$2
-  [ -p "$fifo" ] || exit 1
-  exec 3<> "$fifo"
-  [ -p /dev/fd/3 ] || {
-    rm -f "$fifo"
-    exit 1
-  }
+  open_reply "$dir/reply.$2" || exit 1
   cat >&3
+}
+
+# answers: the stdin lines "<pid><TAB><password>" become the passwords in the helpers' reply
+# FIFOs; the password is split off at the first tab and may hold more. At EOF the relay ends.
+answers() {
+  while IFS= read -r line; do
+    pid=${line%%"$tab"*}
+    case $pid in '' | *[!0-9]*) continue ;; esac
+    case $line in *"$tab"*) ;; *) continue ;; esac
+    (open_reply "$dir/reply.$pid" && printf '%s\n' "${line#*"$tab"}" >&3)
+  done
+  [ -p "$dir/req" ] && printf 'stop\n' 1<> "$dir/req"
+}
+
+# serve_stdin TOKEN: the relay connection of a plain connection (see the header).
+serve_stdin() {
+  token=$1
+  host=$(uname -n)
+  dir=
+  trap 'kill "$reader" 2> /dev/null; [ -z "$dir" ] || rm -rf "$dir"' EXIT
+  trap 'exit 0' HUP TERM
+  case $token in '' | *[!0-9a-f]*) ;; *) choose_dir ;; esac
+  if [ -z "$dir" ] || ! { IFS=' ' read -r askpass_b64 ssh_b64 &&
+    install_files "$askpass_b64" "$ssh_b64" "$CCAP_RS_B64"; }; then
+    echo "$me: cannot set up the token directory" >&2
+    echo cc-askpass-failed
+    exit 1
+  fi
+  unset CCAP_RS_B64
+  exec 3<> "$dir/req"
+  printf '%s\n' "$$" > "$dir/relay.pid"
+  printf 'cc-askpass-ready %s\n' "$dir"
+  # A background command's stdin is /dev/null unless it is redirected.
+  exec 4<&0
+  answers <&4 &
+  reader=$!
+  relay_loop
+  exit 0
 }
 
 # pgid_of PID: the process group of PID.
@@ -276,5 +360,7 @@ case ${1:-} in
   relay) relay "${2:-}" ;;
   reply) reply "${2:-}" "${3:-}" ;;
   stop) stop "${2:-}" ;;
+  serve-stdin) serve_stdin "${2:-}" ;;
+  run) run ;;
   *) bootstrap ;;
 esac

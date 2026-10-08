@@ -406,6 +406,99 @@ env PATH="$shimdir:$tmp/xo:$PATH" sh "$wrapper" h 2>> "$tmp/err" || fail 'ssh wr
 [ ! -s "$tmp/err" ] || fail "stderr: $(cat "$tmp/err")"
 teardown
 
+# ---- remote.sh without multiplexing: serve-stdin and run ----
+
+await() {
+  n=0
+  until eval "$1"; do
+    n=$((n + 1))
+    [ "$n" -lt 30 ] || return 1
+    sleep 0.1 2> /dev/null || sleep 1
+  done
+}
+
+# serve_up: remote.sh serve-stdin with its stdin held open on fd 5; $sdir is its directory.
+serve_up() {
+  tok=0123456789abcdef
+  mkdir "$tmp/base"
+  mkfifo "$tmp/in"
+  CCAP_TEST_BASES="$tmp/base" CCAP_RS_B64=$(base64 < "$root/bin/remote.sh" | tr -d '\n') \
+    sh "$root/bin/remote.sh" serve-stdin "$tok" < "$tmp/in" > "$tmp/out" 2> "$tmp/err" &
+  serve_pid=$!
+  exec 5> "$tmp/in"
+  sdir=$tmp/base/cc-askpass-$tok
+  printf '%s %s\n' "$(printf '#!/bin/sh\n' | base64 | tr -d '\n')" "$(printf '#!/bin/sh\n' | base64 | tr -d '\n')" >&5
+  await '[ -s "$tmp/out" ]'
+}
+
+# serve_down: close its stdin and wait for it to end.
+serve_down() {
+  exec 5>&-
+  wait "$serve_pid"
+}
+
+# helper PID: a fake helper asks as PID and keeps what it is answered in $tmp/got.
+helper() {
+  mkfifo "$sdir/reply.$1"
+  cat "$sdir/reply.$1" > "$tmp/got" &
+  printf '%s\tP\t\t\n' "$1" > "$sdir/req"
+}
+
+setup 'serve-stdin sets up and announces the directory'
+serve_up
+[ "$(head -n 1 "$tmp/out")" = "cc-askpass-ready $sdir" ] || fail "out: $(cat "$tmp/out") err: $(cat "$tmp/err")"
+[ "$(find "$sdir" -prune -perm 700)" = "$sdir" ] || fail 'not mode 700'
+[ "$(ls "$sdir" | tr '\n' ' ')" = 'askpass owner.pid relay.pid remote.sh req ssh sudo ' ] || fail "files: $(ls "$sdir")"
+cmp -s "$root/bin/remote.sh" "$sdir/remote.sh" || fail 'remote.sh differs'
+serve_down
+teardown
+
+setup 'serve-stdin relays and answers'
+serve_up
+helper 123
+await '[ "$(wc -l < "$tmp/out")" = 2 ]' || fail "out: $(cat "$tmp/out")"
+[ "$(sed -n 2p "$tmp/out")" = "$(printf '123\tP\t\t')" ] || fail "out: $(cat "$tmp/out")"
+printf '123\tpw\n' >&5
+await '[ "$(cat "$tmp/got" 2> /dev/null)" = pw ]' || fail "got: $(cat "$tmp/got")"
+serve_down
+teardown
+
+setup 'reply keeps tabs and edge spaces'
+serve_up
+helper 123
+await '[ "$(wc -l < "$tmp/out")" = 2 ]'
+printf '123\t  a\tb  \n' >&5
+await '[ -s "$tmp/got" ]'
+printf '  a\tb  \n' | cmp -s - "$tmp/got" || fail "got: $(cat "$tmp/got")"
+serve_down
+teardown
+
+setup 'stdin EOF cleans up'
+serve_up
+[ -d "$sdir" ] || fail 'no directory'
+exec 5>&-
+await '[ ! -d "$sdir" ]' || fail 'directory still there'
+wait "$serve_pid" || fail "status $?"
+teardown
+
+setup 'serve-stdin without a usable base fails'
+echo x | CCAP_TEST_BASES="$tmp/nonexistent" sh "$root/bin/remote.sh" serve-stdin 0123456789abcdef > "$tmp/out" 2> /dev/null
+status=$?
+[ "$status" = 1 ] && [ "$(cat "$tmp/out")" = cc-askpass-failed ] || fail "status $status out: $(cat "$tmp/out")"
+teardown
+
+setup 'run uses the prepared directory'
+serve_up
+got=$(CCAP_DIR=$sdir CCAP_CMD_B64=$(printf 'echo "$SUDO_ASKPASS"' | base64) sh "$root/bin/remote.sh" run)
+[ "$got" = "$sdir/askpass" ] || fail "got: $got"
+serve_down
+teardown
+
+setup 'run without a valid directory runs plainly'
+got=$(CCAP_DIR=/nonexistent CCAP_CMD_B64=$(printf 'echo "[$SUDO_ASKPASS]"' | base64) sh "$root/bin/remote.sh" run)
+[ "$got" = '[]' ] || fail "got: $got"
+teardown
+
 # ---- End to end: the wrapper against sshds of our own on 127.0.0.1, as this user ----
 
 askpass="$root/bin/askpass"
