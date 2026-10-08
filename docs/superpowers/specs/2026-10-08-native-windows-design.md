@@ -163,8 +163,7 @@ Before `next(e)`, as on Linux, and only with a person at the prompt:
    holds only `ssh.exe`, which PowerShell and native programs find for `ssh`. Git Bash's
    `/etc/profile` puts its own directories (`/usr/bin` among them) before the inherited PATH,
    so for bash the mod also sets the environment variable `BASH_FUNC_ssh%%` to
-   `() {  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "<shim ssh.exe, forward slashes>" "$@"
-}`:
+   `() {  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "<shim ssh.exe, forward slashes>" "$@"\n}`:
    every bash (the Bash tool, `bash -c`, `sh -c`, scripts) imports it as an `ssh` function. The
    two variables stop Git Bash from rewriting POSIX-looking arguments (`/etc/x`) into Windows
    paths on the way to a native program, which Git's own ssh would never see.
