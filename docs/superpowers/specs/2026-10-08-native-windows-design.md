@@ -85,6 +85,10 @@ and leaving the decision to the person at the pane.
   connection (9 logins for 9 sessions).
 - Git Bash cannot open `//./pipe/…` as a file.
 - Git's ssh 9.7 refuses user names with shell characters; Windows OpenSSH 9.5 does not.
+- The PowerShell tool runs `pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command
+  "…Invoke-Expression -Command $__claudeCodeScript"` under `cmd.exe`, the command itself in the
+  environment variable `CLAUDE_CODE_SHELL_LAUNCHER_SCRIPT`: it is not on any command line. The
+  Bash tool's `bash.exe -c "… eval '<command>'"` carries it, as on Linux.
 
 ## 4. Request model: show, don't judge (all platforms)
 
@@ -135,7 +139,8 @@ hooks/register.tsx  platform branch
 tests/win.ps1       Windows tests (§10)
 ```
 
-`<hash>` is the first 16 hex digits of the SHA-256 of `cc-askpass.cs`. `win/out/` is in
+`<hash>` is the 64-bit FNV-1a hash of `cc-askpass.cs` in hex, computed by the mod from the
+source text (`$.fs.read`; the module has no crypto library). It only tells builds apart. `win/out/` is in
 `.gitignore`: the repository holds no binaries.
 
 ### 5.2 Platform detection
@@ -253,9 +258,13 @@ and `ssh` wrappers are A's (the hosts are POSIX).
 
 ## 7. Pane
 
-As today, plus `Asked by:` under the heading, before `Claude ran:`, on every platform. The
-mod records PowerShell tool commands as well as Bash tool commands for `Claude ran:`, matched
-against the ancestors' command lines as on Linux. The system prompt note on Windows covers ssh
+As today, plus `Asked by:` under the heading, before `Claude ran:`, on every platform.
+`Claude ran:` on Windows: a Bash tool command is matched against the ancestors' command lines
+as on Linux. A PowerShell tool command is on no command line (§3), so when an ancestor runs
+the PowerShell tool's launcher (`$__claudeCodeScript`) and exactly one PowerShell tool call is
+in progress (the mod tracks calls from `tool.call` until `next` resolves), that call's command
+is shown; otherwise `Claude ran:` is left out for a local request and shows `(unknown)` for a
+remote one, as today. The system prompt note on Windows covers ssh
 only (no local sudo).
 
 ## 8. Error handling (Windows)
