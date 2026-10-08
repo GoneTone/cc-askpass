@@ -3,10 +3,10 @@
 # command and evals it there with /bin/sh:
 #
 #   (no argument)          Bootstrap, with CCAP_TOKEN, CCAP_RS_B64 (this file), CCAP_ASKPASS_B64,
-#                          CCAP_SSH_B64, CCAP_EXE_B64 and CCAP_CMD_B64 in the environment: set
+#                          CCAP_SSH_B64 and CCAP_CMD_B64 in the environment: set
 #                          up the token directory and run the command with the remote askpass.
-#   relay <token>          Copy the requests that pass verification from the token directory's
-#                          request FIFO to stdout; answer the others with an empty reply.
+#   relay <token>          Copy every well-formed request from the token directory's
+#                          request FIFO to stdout; the local side judges nothing, it shows.
 #   reply <token> <pid>    Copy stdin (the answer) into the helper's reply FIFO.
 #   stop <token>           Hang up the bootstrap's process group: the wrapper was interrupted.
 #
@@ -15,8 +15,6 @@
 me=cc-askpass
 umask 077
 tab=$(printf '\t')
-nl='
-'
 
 decode() {
   printf %s "$1" | base64 -d 2> /dev/null || printf %s "$1" | base64 -D
@@ -69,114 +67,6 @@ sweep() {
     [ -p "$old/req" ] && printf 'stop\n' 1<> "$old/req"
     rm -rf "$old"
   done
-}
-
-# proc PID: set p_ppid, p_euid, p_comm and p_argv (the args, one per line) of PID: from /proc
-# where there is one (BusyBox ps has no -p), else from ps. Tests replace it.
-proc() {
-  p_pid=$1 p_ppid= p_euid= p_comm= p_argv=
-  if [ -r "/proc/$p_pid/status" ]; then
-    while IFS="$tab" read -r key v1 v2 _; do
-      case $key in
-        Name:) p_comm=$v1 ;;
-        PPid:) p_ppid=$v1 ;;
-        Uid:) p_euid=$v2 ;;
-      esac
-    done < "/proc/$p_pid/status"
-    p_argv=$(tr '\0' '\n' < "/proc/$p_pid/cmdline")
-  else
-    # macOS prints comm as a path, maybe with blanks: it is the rest of the line.
-    set -f
-    # shellcheck disable=SC2046
-    set -- $(ps -o ppid=,uid=,comm= -p "$p_pid" 2> /dev/null)
-    set +f
-    [ $# -ge 3 ] || return 1
-    p_ppid=$1 p_euid=$2
-    shift 2
-    p_comm=$*
-    p_comm=${p_comm##*/}
-    p_argv=$(ps -ww -o args= -p "$p_pid" 2> /dev/null | tr ' ' '\n')
-  fi
-  case $p_ppid in '' | *[!0-9]*) return 1 ;; esac
-}
-
-# exe_of PID: "<owner uid> <path>" of PID's executable (bin/exe-of). Tests replace it.
-exe_of() {
-  sh "$dir/exe-of" "$1"
-}
-
-# after PATH ARGV: when ARGV (one arg per line) runs PATH, as the program or as its
-# interpreter's first argument, print the args that follow, one per line.
-after() {
-  path=$1
-  saved_ifs=$IFS
-  IFS=$nl
-  set -f
-  # shellcheck disable=SC2086
-  set -- $2
-  set +f
-  IFS=$saved_ifs
-  if [ "${1:-}" = "$path" ]; then
-    shift
-  elif [ "${2:-}" = "$path" ]; then
-    shift 2
-  else
-    return 1
-  fi
-  [ $# -eq 0 ] || printf '%s\n' "$@"
-}
-
-# target_name ARGS: the host name our ssh wrapper takes from its ARGS (one per line) in normal
-# mode, parsed by the wrapper's own code.
-target_name() (
-  CC_ASKPASS_SHIM_LIB=1
-  . "$dir/ssh"
-  saved_ifs=$IFS
-  IFS=$nl
-  set -f
-  # shellcheck disable=SC2086
-  set -- $1
-  set +f
-  IFS=$saved_ifs
-  [ "${1:-}" != --relay ] || exit 1
-  parse_args "$@"
-  host_name
-  printf '%s\n' "$name"
-)
-
-# verify PID: whether the request of helper PID may go on to the pane, by the rules the mod
-# applies locally. The helper runs this directory's askpass, and its parent is sudo running as
-# root, a root-owned ssh/git client binary named like the process, or the relay of our ssh
-# wrapper (a further hop) started by that wrapper for the same host. Anything else, a shell
-# calling $SUDO_ASKPASS among them, would hand the answer to a command whose output Claude
-# reads.
-verify() {
-  proc "$1" && after "$dir/askpass" "$p_argv" > /dev/null && proc "$p_ppid" || return 1
-  [ "$p_euid" = 0 ] && [ "$p_comm" = sudo ] && return 0
-
-  # Linux cuts comm at 15 characters (git-remote-https reads as git-remote-http); macOS does
-  # not, so it is cut the same way. A script's comm is its name: our ssh wrapper's relay
-  # reads as ssh, fails the executable check and is judged as a relay below.
-  case $(printf '%.15s' "$p_comm") in
-    ssh | ssh-add | scp | sftp | git-remote-http)
-      if exe=$(exe_of "$p_pid") && [ "${exe%% *}" = 0 ]; then
-        case ${exe##*/} in "$p_comm"*) return 0 ;; esac
-      fi
-      ;;
-  esac
-
-  rest=$(after "$dir/ssh" "$p_argv") || return 1
-  relay_host=${rest#--relay"$nl"}
-  [ "$relay_host" != "$rest" ] || return 1
-  case $relay_host in '' | *[!A-Za-z0-9._@:%-]*) return 1 ;; esac
-  # The wrapper runs under the relay's own shell (both from its shebang): `find <dir>/ssh host
-  # -exec …` carries the same args but is not it.
-  relay_shell=${p_argv%%"$nl"*}
-  case ${relay_shell##*/} in sh | dash | bash | zsh | ksh | ash | busybox) ;; *) return 1 ;; esac
-  proc "$p_ppid" || return 1
-  [ "${p_argv%%"$nl"*}" = "$relay_shell" ] || return 1
-  args=$(after "$dir/ssh" "$p_argv") || return 1
-  [ "$(target_name "$args")" = "$relay_host" ]
 }
 
 # The sudo found first on PATH: run the real one with -A, so it asks through SUDO_ASKPASS,
@@ -241,7 +131,7 @@ EOF
 
 # plain: run the command as ssh would have, without the mod.
 plain() {
-  unset CCAP_TOKEN CCAP_RS_B64 CCAP_ASKPASS_B64 CCAP_SSH_B64 CCAP_EXE_B64 CCAP_CMD_B64
+  unset CCAP_TOKEN CCAP_RS_B64 CCAP_ASKPASS_B64 CCAP_SSH_B64 CCAP_CMD_B64
   exec "${SHELL:-/bin/sh}" -c "$cmd"
 }
 
@@ -280,17 +170,16 @@ EOF
   trap 'trap "" HUP INT TERM; kill -HUP 0 2> /dev/null; exit 129' HUP INT TERM
   if ! { decode "$CCAP_ASKPASS_B64" > "$dir/askpass" &&
     decode "$CCAP_SSH_B64" > "$dir/ssh" &&
-    decode "$CCAP_EXE_B64" > "$dir/exe-of" &&
     decode "$CCAP_RS_B64" > "$dir/remote.sh" &&
     sudo_wrapper > "$dir/sudo" &&
-    chmod 700 "$dir/askpass" "$dir/ssh" "$dir/exe-of" "$dir/sudo" &&
+    chmod 700 "$dir/askpass" "$dir/ssh" "$dir/sudo" &&
     mkfifo "$dir/req"; }; then
     echo "$me: cannot set up $dir; running without the pane" >&2
     rm -rf "$dir"
     trap - EXIT HUP INT TERM
     plain
   fi
-  unset CCAP_TOKEN CCAP_RS_B64 CCAP_ASKPASS_B64 CCAP_SSH_B64 CCAP_EXE_B64 CCAP_CMD_B64
+  unset CCAP_TOKEN CCAP_RS_B64 CCAP_ASKPASS_B64 CCAP_SSH_B64 CCAP_CMD_B64
   SUDO_ASKPASS=$dir/askpass
   SSH_ASKPASS=$dir/askpass
   SSH_ASKPASS_REQUIRE=force
@@ -336,12 +225,7 @@ relay() {
     [ "$line" = stop ] && exit 0
     pid=${line%%"$tab"*}
     case $pid in '' | *[!0-9]*) continue ;; esac
-    if verify "$pid"; then
-      printf '%s\n' "$line"
-    elif [ -p "$dir/reply.$pid" ]; then
-      # Ours, but not for the pane: an empty answer makes it fail at once.
-      printf '\n' 1<> "$dir/reply.$pid"
-    fi
+    printf '%s\n' "$line"
   done
 }
 

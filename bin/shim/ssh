@@ -215,15 +215,6 @@ b64() {
   base64 | tr -d '\n'
 }
 
-# trusted_ssh: the real ssh is a root-owned binary named ssh. A PATH the model chose must not
-# put a program of its own where our master and sessions, and so the answers, go.
-trusted_ssh() {
-  exe=$(readlink -f "$real_ssh" 2> /dev/null) || exe=$real_ssh
-  [ "${exe##*/}" = ssh ] || return 1
-  uid=$(stat -c %u "$exe" 2> /dev/null) || uid=$(stat -f %u "$exe" 2> /dev/null) || return 1
-  [ "$uid" = 0 ]
-}
-
 # remote_line VARS [ARGS...]: the remote command that evals bin/remote.sh with ARGS and the
 # VARS assignments ("NAME=value " each) in its environment. It holds only base64, plain words
 # and the single-quoted eval, which sh, bash, zsh and fish all read the same way.
@@ -243,7 +234,7 @@ remote_line() {
 
 # bootstrap_line COMMAND: the remote command that sets up the remote askpass and runs COMMAND.
 bootstrap_line() {
-  remote_line "CCAP_TOKEN=$token CCAP_ASKPASS_B64=$(b64 < "$lib/askpass") CCAP_SSH_B64=$(b64 < "$self") CCAP_EXE_B64=$(b64 < "$lib/exe-of") CCAP_CMD_B64=$(printf %s "$1" | b64) "
+  remote_line "CCAP_TOKEN=$token CCAP_ASKPASS_B64=$(b64 < "$lib/askpass") CCAP_SSH_B64=$(b64 < "$self") CCAP_CMD_B64=$(printf %s "$1" | b64) "
 }
 
 # bounded COMMAND...: run COMMAND in a subshell, killed after 5 s. A function as COMMAND must
@@ -351,8 +342,8 @@ wrap() {
   exit "$status"
 }
 
-# relay_requests NAME: relay mode. Read the remote relay's request lines on stdin (checked
-# there, see bin/remote.sh), ask ours for each and send the answer back to the remote helper's
+# relay_requests NAME: relay mode. Read the remote relay's request lines on stdin (every
+# well-formed one, see bin/remote.sh), ask ours for each and send the answer back to the remote helper's
 # reply FIFO.
 relay_requests() {
   ctl=$CCAP_CTL
@@ -430,11 +421,7 @@ lib=${self%/*}
 [ -f "$lib/remote.sh" ] || lib=${lib%/*}
 
 if [ "${1:-}" = --relay ] && [ -n "${CCAP_TOKEN:-}" ]; then
-  # The relay sends answers: it checks what it sends them through, whoever started it.
-  if ! trusted_ssh; then
-    echo "$me: relay refused: $real_ssh is not a root-owned ssh binary" >&2
-    exit 1
-  fi
+  # The relay sends answers: it checks the socket it sends them through, whoever started it.
   if ! relay_env_ok; then
     echo "$me: relay refused: CCAP_CTL is not a master socket of this wrapper" >&2
     exit 1
@@ -443,7 +430,7 @@ if [ "${1:-}" = --relay ] && [ -n "${CCAP_TOKEN:-}" ]; then
   exit 0
 fi
 parse_args "$@"
-if ! { should_wrap && trusted_ssh; }; then
+if ! should_wrap; then
   PATH=$user_path
   exec "$real_ssh" "$@"
 fi

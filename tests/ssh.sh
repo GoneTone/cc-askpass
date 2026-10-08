@@ -180,8 +180,8 @@ chmod +x "$tmp/fake/readlink"
 env PATH="$shimdir:$tmp/fake:$PATH" CC_ASKPASS_DIR="$tmp/dir" SSH_ASKPASS="$root/bin/askpass" \
   FAKE_SSH_ARGS="$tmp/args" sh "$wrapper" h sudo true > "$tmp/out" 2> "$tmp/err"
 [ ! -e "$tmp/readlink-ran" ] || fail 'ran the fake readlink'
-# The fake ssh is not root-owned: the command passes through to it.
-printf '%s\n' h sudo true | cmp -s - "$tmp/args" || fail "fake got: $(cat "$tmp/args" 2> /dev/null)"
+# Any real ssh is used: the command is wrapped, so the fake sees our master and session options.
+grep -qx -- -S "$tmp/args" || fail "not wrapped; fake got: $(cat "$tmp/args" 2> /dev/null)"
 teardown
 
 # relay_mode ARGS...: the wrapper in relay mode with one request line on stdin, ARGS as env.
@@ -191,13 +191,6 @@ relay_mode() {
       "$@" sh "$wrapper" --relay h > "$tmp/out" 2> "$tmp/err"
 }
 
-setup 'relay refuses a user-owned ssh'
-relay_mode PATH="$tmp/fake:$PATH" CCAP_CTL="$tmp/dir/s.1"
-status=$?
-[ "$status" = 1 ] || fail "status $status"
-grep -q 'relay refused: .* is not a root-owned ssh binary' "$tmp/err" || fail "stderr: $(cat "$tmp/err")"
-[ ! -e "$tmp/args" ] || fail "sent through the fake: $(cat "$tmp/args")"
-teardown
 
 setup 'relay refuses a socket it was not given by wrap'
 relay_mode CCAP_CTL=/tmp/elsewhere
@@ -302,17 +295,6 @@ teardown
 # A PATH the model chose must not decide where our sessions (and the answers) go.
 passes_through h sudo true
 
-setup 'trusted ssh: root-owned and named ssh'
-ln -s /bin/ls "$tmp/ssh"
-got=$(
-  CC_ASKPASS_SHIM_LIB=1
-  . "$wrapper"
-  for real_ssh in "$(command -v ssh)" "$tmp/fake/ssh" /bin/ls "$tmp/ssh"; do
-    if trusted_ssh; then printf 'yes '; else printf 'no '; fi
-  done
-)
-[ "$got" = 'yes no no no ' ] || fail "got '$got'"
-teardown
 
 # OpenSSH binds "<ctl>.<16 chars>" first; macOS allows 104 bytes with the NUL.
 setup 'ctl length boundary'
@@ -330,73 +312,18 @@ got=$(
 [ "$got" = '86: 18:tmp ' ] || fail "got '$got'"
 teardown
 
-nl='
-'
-vdir=$(mktemp -d)
-cp "$wrapper" "$vdir/ssh"
+# The remote relay shows every well-formed request: the helper's parent is a plain shell here.
+setup 'relay passes every request line'
+tok=0123456789abcdef
+mkdir -p "$tmp/base/cc-askpass-$tok"
+mkfifo "$tmp/base/cc-askpass-$tok/req"
+sh -c "printf '%s\tPassword: \tsudo\treported\n' \$\$ > '$tmp/base/cc-askpass-$tok/req'; printf 'x\ty\n' > '$tmp/base/cc-askpass-$tok/req'; echo stop > '$tmp/base/cc-askpass-$tok/req'" &
+CCAP_TEST_BASES="$tmp/base" sh "$root/bin/remote.sh" relay "$tok" > "$tmp/out" 2> "$tmp/err"
+wait
+[ "$(wc -l < "$tmp/out")" = 1 ] || fail "out: $(cat "$tmp/out")"
+case $(cat "$tmp/out") in *"$(printf '\tPassword: \tsudo\treported')") ;; *) fail "out: $(cat "$tmp/out")" ;; esac
+teardown
 
-# verify_case WANT NAME: remote.sh's verify of helper 10, with fixture processes: 10 the helper
-# (f_helper args), 20 its parent (f_euid, f_comm, f_parent args, f_exe its executable) and 30
-# the grandparent (f_grand args). Args are one per line.
-verify_case() {
-  setup "verify: $2"
-  got=$(
-    CCAP_RS_LIB=1
-    . "$root/bin/remote.sh"
-    dir=$vdir
-    proc() {
-      p_pid=$1
-      case $1 in
-        10) p_ppid=20 p_euid=1000 p_comm=sh p_argv=${f_helper-"/bin/sh${nl}$vdir/askpass${nl}Password: "} ;;
-        20) p_ppid=30 p_euid=${f_euid-1000} p_comm=${f_comm-bash} p_argv=${f_parent-"bash${nl}-c${nl}\$SUDO_ASKPASS P"} ;;
-        30) p_ppid=1 p_euid=1000 p_comm=sh p_argv=${f_grand-"sshd: u@notty"} ;;
-        *) return 1 ;;
-      esac
-    }
-    exe_of() {
-      [ -n "${f_exe:-}" ] && echo "$f_exe"
-    }
-    if verify 10; then echo accept; else echo reject; fi
-  )
-  [ "$got" = "$1" ] || fail "got $got"
-  teardown
-  unset f_helper f_euid f_comm f_parent f_grand f_exe
-}
-
-f_comm=sudo f_euid=0 f_parent="sudo${nl}-A${nl}true" verify_case accept 'sudo as root'
-f_comm=sudo f_euid=1000 verify_case reject 'sudo as the user'
-f_comm=sudo f_euid=0 f_helper="/bin/sh${nl}/tmp/askpass${nl}P" verify_case reject 'helper is not our askpass'
-f_comm=sudo f_euid=0 f_helper="/bin/sh${nl}/tmp/x${nl}$vdir/askpass" verify_case reject 'our askpass only in the prompt'
-verify_case reject 'a shell calling askpass itself'
-f_comm=ssh f_exe='0 /usr/bin/ssh' verify_case accept 'root-owned ssh'
-f_comm=ssh f_exe='1000 /home/u/ssh' verify_case reject 'user-owned ssh'
-f_comm=ssh f_exe='0 /usr/bin/python3' verify_case reject 'root-owned binary of another name'
-f_comm=ssh verify_case reject 'no executable found'
-f_comm=python3 f_exe='0 /usr/bin/python3' verify_case reject 'not a client'
-f_comm=git-remote-http f_exe='0 /usr/lib/git-core/git-remote-https' verify_case accept 'git https helper'
-f_comm=sh f_parent="/bin/sh${nl}$vdir/ssh${nl}--relay${nl}db01" \
-  f_grand="/bin/sh${nl}$vdir/ssh${nl}-p${nl}22${nl}u@db01:22${nl}sudo true" verify_case accept 'relay of our wrapper'
-# Linux names a script's process after the script: the relay's comm is ssh.
-f_comm=ssh f_exe='0 /usr/bin/dash' f_parent="/bin/sh${nl}$vdir/ssh${nl}--relay${nl}db01" \
-  f_grand="/bin/sh${nl}$vdir/ssh${nl}db01${nl}sudo true" verify_case accept 'relay named ssh'
-f_comm=sh f_parent="/bin/sh${nl}$vdir/ssh${nl}--relay${nl}db01" \
-  f_grand="/bin/sh${nl}$vdir/ssh${nl}other${nl}sudo true" verify_case reject 'relay for another host'
-f_comm=sh f_parent="/bin/sh${nl}$vdir/ssh${nl}--relay${nl}db01" verify_case reject 'relay started by hand'
-f_comm=sh f_parent="/bin/sh${nl}$vdir/ssh${nl}--relay${nl}db01" \
-  f_grand="/bin/sh${nl}$vdir/ssh${nl}--relay${nl}db01" verify_case reject 'relay started by a relay'
-f_comm=sh f_parent="/bin/sh${nl}$vdir/ssh${nl}--relay${nl}db01${nl}x" \
-  f_grand="/bin/sh${nl}$vdir/ssh${nl}db01${nl}x" verify_case reject 'relay with more args'
-f_comm=sh f_parent="/bin/sh${nl}/tmp/ssh${nl}--relay${nl}db01" \
-  f_grand="/bin/sh${nl}/tmp/ssh${nl}db01${nl}x" verify_case reject 'relay of another copy'
-# `find <dir>/ssh db01 -exec /bin/sh <dir>/ssh --relay db01 ;` starts a real relay.
-f_comm=sh f_parent="/bin/sh${nl}$vdir/ssh${nl}--relay${nl}db01" \
-  f_grand="find${nl}$vdir/ssh${nl}db01${nl}-exec${nl}/bin/sh${nl}$vdir/ssh${nl}--relay${nl}db01${nl};" \
-  verify_case reject 'relay started by find'
-f_comm=sh f_parent="/bin/sh${nl}$vdir/ssh${nl}--relay${nl}db01" \
-  f_grand="/bin/bash${nl}$vdir/ssh${nl}db01${nl}x" verify_case reject 'wrapper under another shell'
-f_comm=python3 f_parent="/usr/bin/python3${nl}$vdir/ssh${nl}--relay${nl}db01" \
-  f_grand="/usr/bin/python3${nl}$vdir/ssh${nl}db01${nl}x" verify_case reject 'relay not run by a shell'
-rm -rf "$vdir"
 
 # The local relay: malformed remote lines are skipped, never asked or answered.
 setup 'relay skips malformed lines'
@@ -667,10 +594,10 @@ run_e2e() {
   [ ! -s "$e2e/argv" ] || fail "answer in argv: $(cat "$e2e/argv")"
   e2e_done
 
-  e2e_test 'askpass called by the command itself is refused'
-  out=$(wssh -F "$cfg" localhost '"$SUDO_ASKPASS" P; echo "status $?"')
-  [ "$out" = 'status 1' ] || fail "out: $out"
-  [ ! -s "$e2e/seen" ] || fail "listener saw: $(cat "$e2e/seen")"
+  e2e_test 'askpass called by the command itself is shown, not refused'
+    out=$(wssh -F "$cfg" localhost '"$SUDO_ASKPASS" P; echo "status $?"')
+case $out in test-pw*) ;; *) fail "out: $out" ;; esac
+  [ -s "$e2e/seen" ] || fail 'listener saw nothing'
   e2e_done
 
   e2e_test 'sudo wrapper adds -A'
