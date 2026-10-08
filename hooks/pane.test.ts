@@ -666,7 +666,7 @@ for (const wrapperArgs of ['other sudo apt update', '-p 22 evil server', '--rela
   })
 }
 
-test('Claude ran matching ignores the PATH prefix', async ($, on) => {
+test('Claude ran matching uses the command as Claude wrote it', async ($, on) => {
   const w = await world($, on)
   await w.bashCall('ssh server sudo apt update', 0)
   await w.relayRequest(4242, { prompt: BOB_PROMPT, via: 'server', reported: 'sudo apt update' })

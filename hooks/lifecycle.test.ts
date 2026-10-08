@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import { SESSION_DIR, SESSION_ID, fakeServe, recorder } from './testkit'
 
 const START = { cwd: '/w', surface: 'terminal', isInteractive: true } as const
-const ASKPASS_VARS = ['CC_ASKPASS_DIR', 'CC_ASKPASS_EXCLUDE', 'SUDO_ASKPASS', 'SSH_ASKPASS', 'SSH_ASKPASS_REQUIRE']
+const ASKPASS_VARS = ['CC_ASKPASS_DIR', 'CC_ASKPASS_EXCLUDE', 'CC_ASKPASS_WRAP', 'SUDO_ASKPASS', 'SSH_ASKPASS', 'SSH_ASKPASS_REQUIRE']
 
 test('session.start spawns serve with the session id', async ($, on) => {
   const clock = mock.clock(on)
@@ -35,7 +35,7 @@ test('sets askpass env after ready', async ($, on) => {
   const rec = recorder(on)
   await $.session.start(START)
   await clock.settle()
-  expect(rec.envSets).toEqual([])
+  expect(rec.envSets.filter(set => set.name !== 'PATH')).toEqual([])
   serve.emit(`ready\t${SESSION_DIR}\n`)
   await clock.settle()
   const askpass = serve.argvs[0]?.[0]
@@ -102,7 +102,7 @@ test('no ready in 5 s toasts and sets nothing', async ($, on) => {
   await $.session.start(START)
   await clock.advance(5000)
   expect(rec.toasts).toHaveLength(1)
-  expect(rec.envSets).toEqual([])
+  expect(rec.envSets.filter(set => set.name !== 'PATH')).toEqual([])
 })
 
 test('serve exiting before ready toasts once', async ($, on) => {
@@ -115,7 +115,7 @@ test('serve exiting before ready toasts once', async ($, on) => {
   await clock.settle()
   await clock.advance(5000)
   expect(rec.toasts).toHaveLength(1)
-  expect(rec.envSets).toEqual([])
+  expect(rec.envSets.filter(set => set.name !== 'PATH')).toEqual([])
 })
 
 test('serve exit unsets env', async ($, on) => {
@@ -254,10 +254,10 @@ test('registers /askpass as immediate', async ($, on) => {
   expect(rec.commands).toContainEqual({ name: 'askpass', immediate: true })
 })
 
-/** A session with a ready listener whose Bash commands reach a stand-in tool, recorded. */
-async function bashWorld($: any, on: any) {
+/** A session whose Bash commands reach a stand-in tool, recorded; the listener is ready on demand. */
+async function bashWorld($: any, on: any, env: Record<string, string> = { PATH: '/usr/bin:/bin' }) {
   const clock = mock.clock(on)
-  mock.env(on, {})
+  mock.env(on, env)
   const serve = fakeServe(on)
   const rec = recorder(on)
   const ran: string[] = []
@@ -266,31 +266,15 @@ async function bashWorld($: any, on: any) {
     ran.push(e.command)
     return { result: { stdout: '', stderr: '', interrupted: false }, text: '' } as never
   })
-  // Stands in for the engine's permission decision: a rule allows exactly `git status`. With
-  // `preToolUseDeny`, a PreToolUse hook denies any command still carrying the shim prefix.
-  const checked: string[] = []
-  let preToolUseDeny = false
-  on('tool.check', (_$: unknown, e: { input: { command: string } }) => {
-    checked.push(e.input.command)
-    if (preToolUseDeny && e.input.command.includes('/bin/shim')) return { decision: 'deny', hook: 'PreToolUse' } as never
-    return (e.input.command === 'git status' ? { decision: 'allow', rule: 'Bash(git status)' } : { decision: 'ask' }) as never
-  })
   await $.session.start(START)
   await clock.settle()
+  const root = (serve.argvs[0]?.[0] ?? '').replace(/\/bin\/askpass$/, '')
   return {
     rec,
-    ran,
-    checked,
-    denyInPreToolUse() {
-      preToolUseDeny = true
-    },
-    async check(command: string) {
-      return $.tool.check({ tool: 'Bash', input: { command } })
-    },
+    root,
     async ready() {
       serve.emit(`ready\t${SESSION_DIR}\n`)
       await clock.settle()
-      return (serve.argvs[0]?.[0] ?? '').replace(/\/bin\/askpass$/, '')
     },
     async stop() {
       serve.end()
@@ -303,17 +287,45 @@ async function bashWorld($: any, on: any) {
   }
 }
 
-test('prefixes Bash commands with the shim directory while listening', async ($, on) => {
+// The Bash tool takes PATH from a shell snapshot made as the session starts; a command that
+// changed it would lose the permission dialog's "don't ask again" option.
+test('puts the shim directory first on PATH as the session starts', async ($, on) => {
   const w = await bashWorld($, on)
-  expect(await w.bash('ssh h sudo true')).toBe('ssh h sudo true')
-  const root = await w.ready()
-  expect(await w.bash('ssh h sudo true')).toBe(`export PATH='${root}/bin/shim':"$PATH"; ssh h sudo true`)
+  expect(w.rec.envValue('PATH')).toBe(`${w.root}/bin/shim:/usr/bin:/bin`)
 })
 
-test('no prefix with remoteHosts off', { options: { remoteHosts: false } }, async ($, on) => {
+test('leaves Bash commands as Claude wrote them', async ($, on) => {
   const w = await bashWorld($, on)
   await w.ready()
   expect(await w.bash('ssh h sudo true')).toBe('ssh h sudo true')
+})
+
+test('no PATH change without a person at the prompt', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { PATH: '/usr/bin' })
+  fakeServe(on)
+  const rec = recorder(on)
+  await $.session.start({ ...START, isInteractive: false })
+  await clock.settle()
+  expect(rec.envSets.some(set => set.name === 'PATH')).toBe(false)
+})
+
+test('switches remote prompts on while listening', async ($, on) => {
+  const w = await bashWorld($, on)
+  expect(w.rec.envValue('CC_ASKPASS_WRAP')).toBe(undefined)
+  await w.ready()
+  expect(w.rec.envValue('CC_ASKPASS_WRAP')).toBe('1')
+  await w.stop()
+  expect(w.rec.envValue('CC_ASKPASS_WRAP')).toBe(undefined)
+})
+
+// The shim stays on PATH; the wrapper steps aside unless this is 1, so the option takes
+// effect both ways without a new session.
+test('remoteHosts off keeps the switch off', { options: { remoteHosts: false } }, async ($, on) => {
+  const w = await bashWorld($, on)
+  await w.ready()
+  expect(w.rec.envValue('PATH')).toBe(`${w.root}/bin/shim:/usr/bin:/bin`)
+  expect(w.rec.envSets.some(set => set.name === 'CC_ASKPASS_WRAP' && set.value === '1')).toBe(false)
 })
 
 test('sets CC_ASKPASS_EXCLUDE from excludeHosts', { options: { excludeHosts: ['*.internal', 'git.example.com'] } }, async ($, on) => {
@@ -328,56 +340,12 @@ test('the sudo note mentions ssh', async ($, on) => {
   expect((await sudoNote($))?.text).toContain('ssh host sudo')
 })
 
-test('drops the prefix when the listener stops', async ($, on) => {
-  const w = await bashWorld($, on)
-  await w.ready()
-  await w.stop()
-  expect(await w.bash('ssh h sudo true')).toBe('ssh h sudo true')
-})
-
 test('the sudo note leaves out ssh with remoteHosts off', { options: { remoteHosts: false } }, async ($, on) => {
   const w = await bashWorld($, on)
   await w.ready()
   const text = (await sudoNote($))?.text ?? ''
   expect(text).toContain('Do not add `-n` or `-S`')
   expect(text).not.toContain('ssh host sudo')
-})
-
-test('permission rules see the command without the prefix', async ($, on) => {
-  const w = await bashWorld($, on)
-  await w.ready()
-  const ran = await w.bash('git status')
-  expect(ran).not.toBe('git status')
-  const verdict = await w.check(ran)
-  expect(verdict.decision).toBe('allow')
-  expect(verdict.rule).toBe('Bash(git status)')
-  expect(w.checked.at(-1)).toBe('git status')
-  expect((await w.check(await w.bash('git push'))).decision).toBe('ask')
-  expect(w.checked.at(-1)).toBe('git push')
-})
-
-test('a command without the prefix is checked as it is', async ($, on) => {
-  const w = await bashWorld($, on)
-  await w.ready()
-  expect((await w.check('git status')).decision).toBe('allow')
-  expect((await w.check('echo x')).decision).toBe('ask')
-  expect(w.checked).toEqual(['git status', 'echo x'])
-})
-
-test('a PreToolUse decision on the prefixed command stands', async ($, on) => {
-  const w = await bashWorld($, on)
-  await w.ready()
-  w.denyInPreToolUse()
-  expect(await w.check(await w.bash('git status'))).toEqual({ decision: 'deny', hook: 'PreToolUse' })
-})
-
-test('with the listener down, checks are unchanged', async ($, on) => {
-  const w = await bashWorld($, on)
-  expect((await w.check(await w.bash('git status'))).decision).toBe('allow')
-  await w.ready()
-  await w.stop()
-  expect((await w.check(await w.bash('git status'))).decision).toBe('allow')
-  expect(w.checked).toEqual(['git status', 'git status'])
 })
 
 test('CC_ASKPASS_EXCLUDE is empty by default', async ($, on) => {

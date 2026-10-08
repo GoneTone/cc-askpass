@@ -81,7 +81,7 @@ This is an open-source tool: the design covers every scenario below, not one use
 
 ```
 Claude's Bash command
-  └─ tool.call hook: prefix  export PATH='<plugin>/bin/shim':"$PATH";
+  └─ PATH from the session's shell snapshot: <plugin>/bin/shim first (set at session start)
        └─ bin/shim/ssh (wrapper)
             ├─ probe channel   ─┐
             ├─ master: ssh host <bootstrap + original command>
@@ -96,31 +96,33 @@ Claude's Bash command
 
 ```
 bin/askpass          existing helper; ask mode shared with the remote side
-bin/shim/ssh         new: ssh wrapper, the only file in the PATH-prefixed directory
+bin/shim/ssh         new: ssh wrapper, the only file in the directory put first on PATH
 bin/remote.sh        new: remote bootstrap, relay and wrappers, sent base64-encoded
 hooks/core.ts        new pure functions: ssh argument parsing, wrap decision, host label,
                      remote request parsing
-hooks/register.tsx   PATH prefix, remote requests, pane wording, system prompt note, options
+hooks/register.tsx   PATH at session start, remote requests, pane wording, prompt note, options
 tests/ssh.sh         new: wrapper and end-to-end tests
 ```
 
-`bin/shim/` holds only `ssh` so the PATH prefix shadows nothing else.
+`bin/shim/` holds only `ssh` so putting it first on PATH shadows nothing else.
 
-### 4.2 The `tool.call` prefix
+### 4.2 PATH at session start
 
-For Bash calls, while the listener is running, the hook prefixes the command with
-`export PATH='<plugin root>/bin/shim':"$PATH"; ` (the root single-quoted, `'` escaped). The
-prefix runs after the snapshot, so child processes (rsync, git, ansible, scripts) inherit it.
-The command recorded for the "Claude ran" line stays the original one. With the listener down
-or the remote feature turned off, no prefix is added.
+On `session.start`, before calling `next`, the mod puts `<plugin root>/bin/shim` first on PATH
+with `$.env.set` (once: a reload finds it already there). The Bash tool takes PATH from a shell
+snapshot made as the session starts, so every Bash command and its children (rsync, git,
+ansible, scripts) find the wrapper, with the command itself untouched. Verified on Ubuntu (WSL)
+and macOS 26, `/etc/profile` and `path_helper` included.
 
-`tool.check` fires after `tool.call` with the rewritten command, so a `tool.check` hook takes the
-prefix off again: for a command that starts with exactly this prefix it runs the engine's own
-check (`next`) and, unless a PreToolUse hook decided there, answers with
-`$.tool.check({ tool: 'Bash', input: { ...input, command: <without the prefix> } })`. Permission
-rules (`Bash(git status)`) therefore match the command Claude wrote; the query skips the calling
-hook's own frame, so it cannot loop. PreToolUse hooks and the auto-mode classifier still see the
-prefixed command.
+A command that changed PATH itself (an `export PATH=…;` prefix, as the first implementation
+did) costs every permission dialog its "don't ask again" option and shows the prefix in it;
+that design was dropped after the manual end-to-end test.
+
+The snapshot cannot be changed later, so the shim stays on PATH for the whole session. The live
+switch is `CC_ASKPASS_WRAP`: the mod sets it to `1` while the listener runs and `remoteHosts`
+is on, and unsets it otherwise; the wrapper passes straight through unless it is `1`. Turning
+the option on or off therefore takes effect at once. Without a person at the prompt (`-p`, the
+SDK) PATH is left alone.
 
 ### 4.3 `bin/shim/ssh`
 
@@ -293,7 +295,7 @@ log in themselves.
 
 Declared as `userConfig` in `plugin.json`:
 
-- `remoteHosts` (boolean, default true): the PATH prefix and the wrapper.
+- `remoteHosts` (boolean, default true): the `CC_ASKPASS_WRAP` switch the wrapper checks.
 - `excludeHosts` (list of glob patterns, default empty): hosts the wrapper never touches even
   when the probe would pass.
 
@@ -311,7 +313,7 @@ Declared as `userConfig` in `plugin.json`:
 | Real ssh is not a root-owned `ssh` binary | Pass through |
 | Bash tool timeout / interrupt | On TERM/INT/HUP the wrapper stops the remote command, master and relay; remote trap cleans up on HUP. Claude Code sends KILL 5 s after TERM: a SIGKILLed wrapper stops nothing, and `ControlPersist=10` ends its master 10 s after its last session closes (the remote command, still running, keeps it until it ends) |
 | Connection drops mid-request | Remote askpass watchdog (10 min) ends; next bootstrap removes the stale directory |
-| Listener not running | No PATH prefix; a wrapper run anyway passes through |
+| Listener not running, or `remoteHosts` off | `CC_ASKPASS_WRAP` unset; the wrapper passes through |
 | Real ssh resolves to the wrapper | Error on stderr, exit 255 |
 | Output channels | Wrapper and bootstrap never write to stdout (rsync, git protocols) |
 
@@ -347,8 +349,9 @@ Declared as `userConfig` in `plugin.json`:
   command as one string or several words); pass-through decisions; protocol command detection;
   `excludeHosts` globs; host label from wrapper args, including args crafted to look like a
   different host; remote request line parsing and rejection of malformed lines.
-- `hooks/pane.test.ts` / `lifecycle.test.ts`: PATH prefix only while listening and only for
-  Bash; "Claude ran" matching unaffected by the prefix; remote request accepted only from the
+- `hooks/pane.test.ts` / `lifecycle.test.ts`: the shim put first on PATH at session start
+  (interactive sessions only), Bash commands left as written, `CC_ASKPASS_WRAP` following the
+  listener and `remoteHosts`; remote request accepted only from the
   plugin's wrapper; pane heading, `(reported by …)` label and quoted prompt; the leak test
   extended to the remote flow; options turning the feature off.
 - `tests/ssh.sh` with a recording fake `ssh`: pass-through versus wrap per case, options added,
@@ -363,8 +366,9 @@ Declared as `userConfig` in `plugin.json`:
 
 ## 10. Spikes before building
 
-1. `tool.call` rewrite: the prefixed command runs, the transcript and the "Claude ran" record
-   keep the original, background (`run_in_background`) commands get the prefix too.
+1. PATH set at session start reaches the Bash tool's shell snapshot on Ubuntu (WSL) and
+   macOS: done 2026-10-08 with a throwaway mod (a stand-in `hostname` in the prepended
+   directory ran; the macOS snapshot exported the directory first).
 2. `userConfig` options reach the module (`register(on, options)`), and their change takes
    effect without a restart or after `/reload-plugins`.
 3. sshd on localhost in GitHub Actions on Linux and macOS runners.

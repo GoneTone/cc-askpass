@@ -6,6 +6,9 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 wrapper="$root/bin/shim/ssh"
 shimdir="$root/bin/shim"
 failures=0
+# The mod sets this while remote prompts are on; a test that wants it off unsets it.
+CC_ASKPASS_WRAP=1
+export CC_ASKPASS_WRAP
 
 fail() {
   echo "FAIL: $current: $*"
@@ -124,6 +127,7 @@ decide() {
     lib=$root/bin
     SSH_ASKPASS=${t_askpass-$root/bin/askpass}
     CC_ASKPASS_EXCLUDE=${t_exclude-}
+    CC_ASKPASS_WRAP=${t_wrap-1}
     parse_args "$@"
     if should_wrap; then echo wrap; else echo no; fi
   )
@@ -141,7 +145,7 @@ expect_decision() {
   got=$(decide "$@")
   [ "$got" = "$want" ] || fail "got '$got', want '$want'"
   teardown
-  t_mode= t_exclude= t_askpass=$root/bin/askpass
+  t_mode= t_exclude= t_askpass=$root/bin/askpass t_wrap=1
 }
 
 test_two_wrappers() {
@@ -252,6 +256,8 @@ t_mode=dead expect_decision no h sudo true
 t_askpass= expect_decision no h sudo true
 # The relay asks the askpass beside the wrapper: another one in SSH_ASKPASS means not ours.
 t_askpass=/x expect_decision no h sudo true
+# remoteHosts off: the mod unsets the switch, and the wrapper steps aside at once.
+t_wrap= expect_decision no h sudo true
 expect_decision no -N h sudo true
 expect_decision no h -N -L 1:a:2
 # ps joins the arguments with spaces: the mod would misread a blank up to the host.
@@ -451,6 +457,26 @@ done
 printf '%s\n' '-A true' '-S true' '-u root -S true' '--user root -S true' '--user=root -n true' \
   '-A --user root true' '--prompt x --chdir / -A true' '-A -uroot true' | cmp -s - "$tmp/sudo.args" ||
   fail "sudo got: $(cat "$tmp/sudo.args")"
+teardown
+
+# macOS ships sudo and ssh executable but not readable by users: the wrappers' check of the
+# second line must not print "Permission denied".
+setup 'execute-only binaries print nothing'
+mkdir "$tmp/xo"
+# A binary: `command -v true` names the shell builtin.
+for bin in /bin/true /usr/bin/true; do [ -x "$bin" ] && break; done
+cp "$bin" "$tmp/xo/sudo"
+cp "$bin" "$tmp/xo/ssh"
+chmod 111 "$tmp/xo/sudo" "$tmp/xo/ssh"
+(
+  CCAP_RS_LIB=1
+  . "$root/bin/remote.sh"
+  sudo_wrapper
+) > "$tmp/dir/sudo"
+chmod +x "$tmp/dir/sudo"
+env PATH="$tmp/dir:$tmp/xo:$PATH" "$tmp/dir/sudo" true 2> "$tmp/err" || fail 'sudo wrapper did not run the real sudo'
+env PATH="$shimdir:$tmp/xo:$PATH" sh "$wrapper" h 2>> "$tmp/err" || fail 'ssh wrapper did not run the real ssh'
+[ ! -s "$tmp/err" ] || fail "stderr: $(cat "$tmp/err")"
 teardown
 
 # ---- End to end: the wrapper against sshds of our own on 127.0.0.1, as this user ----

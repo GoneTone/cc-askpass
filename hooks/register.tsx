@@ -21,7 +21,7 @@ import {
   relayWrapperHost,
   remoteLabel,
   stripControl,
-  pathPrefix,
+  withShim,
   wrappedLines,
   shouldMask,
   splitLines,
@@ -414,6 +414,8 @@ async function setEnv($: EngineInterface): Promise<void> {
   await $.env.set('SSH_ASKPASS_REQUIRE', 'force')
   // Read by bin/shim/ssh, one glob per line.
   await $.env.set('CC_ASKPASS_EXCLUDE', excludeHosts.join('\n'))
+  // remoteHosts: the wrapper stays on PATH all session and checks this on every call.
+  await $.env.set('CC_ASKPASS_WRAP', isRemoteOn ? '1' : undefined)
   // sudo only uses askpass when DISPLAY is set; a real display is left alone. The marker
   // survives a hot reload (module variables do not), so ownership of :0 is not forgotten.
   const display = await $.env.get('DISPLAY')
@@ -432,6 +434,7 @@ async function unsetEnv($: EngineInterface): Promise<void> {
   await $.env.set('SSH_ASKPASS', undefined)
   await $.env.set('SSH_ASKPASS_REQUIRE', undefined)
   await $.env.set('CC_ASKPASS_EXCLUDE', undefined)
+  await $.env.set('CC_ASKPASS_WRAP', undefined)
   if (didSetDisplay) {
     await $.env.set('DISPLAY', undefined)
     await $.env.set('CC_ASKPASS_SET_DISPLAY', undefined)
@@ -501,9 +504,13 @@ export const register: Register = (on, options) => {
   excludeHosts = Array.isArray(globs) ? globs.filter((glob): glob is string => typeof glob === 'string') : []
 
   on('session.start', async ($, e, next) => {
-    const started = await next(e)
     // Under -p or the SDK nobody can answer a pane: leave sudo to fail at once as before.
-    if (!e.isInteractive) return started
+    if (!e.isInteractive) return next(e)
+    // Before the session's shell snapshot, which fixes PATH for every Bash command: a command
+    // that changed PATH itself would lose the permission dialog's "don't ask again".
+    const path = withShim(await $.env.get('PATH'), `${$.plugin.root}/bin/shim`)
+    if (path !== null) await $.env.set('PATH', path)
+    const started = await next(e)
     await $.command.register({
       name: 'askpass',
       description: 'Open the pending password prompt',
@@ -521,25 +528,11 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', { tool: 'Bash' }, ($, e, next) => {
-    if (e.tool !== 'Bash') return next(e)
-    // The command as Claude wrote it: the prefix below is ours.
-    recentBashCommands.push(e.command)
-    if (recentBashCommands.length > RECENT_BASH_LIMIT) recentBashCommands.shift()
-    if (!isListening || !isRemoteOn) return next(e)
-    return next({ ...e, command: pathPrefix($.plugin.root) + e.command })
-  })
-
-  // tool.check sees the command tool.call passed on: permission rules (`Bash(git status)`) are
-  // matched against the command Claude wrote, without our prefix.
-  on('tool.check', { tool: 'Bash' }, async ($, e, next) => {
-    const prefix = pathPrefix($.plugin.root)
-    const input = (e.input ?? {}) as { command?: unknown }
-    if (typeof input.command !== 'string' || !input.command.startsWith(prefix)) return next(e)
-    const verdict = await next(e)
-    // A PreToolUse hook decided on the prefixed command; a query asks none, so its word stands.
-    if (verdict.hook !== undefined) return verdict
-    // The query skips this hook's own frame: no loop.
-    return $.tool.check({ tool: 'Bash', input: { ...input, command: input.command.slice(prefix.length) } })
+    if (e.tool === 'Bash') {
+      recentBashCommands.push(e.command)
+      if (recentBashCommands.length > RECENT_BASH_LIMIT) recentBashCommands.shift()
+    }
+    return next(e)
   })
 
   on('session.end', async ($, e, next) => {

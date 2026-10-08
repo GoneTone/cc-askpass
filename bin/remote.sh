@@ -192,7 +192,7 @@ set -f
 for entry in $PATH; do
   [ -n "$entry" ] && [ -f "$entry/sudo" ] && [ -x "$entry/sudo" ] || continue
   line1= line2=
-  { IFS= read -r line1 && IFS= read -r line2; } < "$entry/sudo" 2> /dev/null
+  { IFS= read -r line1 && IFS= read -r line2; } 2> /dev/null < "$entry/sudo"
   [ "$line2" = '# cc-askpass sudo wrapper' ] && continue
   real=$entry/sudo
   break
@@ -296,8 +296,9 @@ EOF
   SSH_ASKPASS_REQUIRE=force
   CC_ASKPASS_DIR=$dir
   CC_ASKPASS_REMOTE=1
+  CC_ASKPASS_WRAP=1
   PATH=$dir:$PATH
-  export SUDO_ASKPASS SSH_ASKPASS SSH_ASKPASS_REQUIRE CC_ASKPASS_DIR CC_ASKPASS_REMOTE PATH
+  export SUDO_ASKPASS SSH_ASKPASS SSH_ASKPASS_REQUIRE CC_ASKPASS_DIR CC_ASKPASS_REMOTE CC_ASKPASS_WRAP PATH
 
   # The relay starts alongside; a prompt before it listens would fail. Without it (sshd
   # refused the session) the askpass fails with its own message.

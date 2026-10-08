@@ -20,7 +20,7 @@ find_real_ssh() {
     # An empty entry means the current directory: never run ssh from there.
     [ -n "$entry" ] && [ -f "$entry/ssh" ] && [ -x "$entry/ssh" ] || continue
     line1= line2=
-    { IFS= read -r line1 && IFS= read -r line2; } < "$entry/ssh" 2> /dev/null
+    { IFS= read -r line1 && IFS= read -r line2; } 2> /dev/null < "$entry/ssh"
     [ "$line2" = '# cc-askpass ssh wrapper' ] && continue
     real_ssh=$entry/ssh
     break
@@ -196,6 +196,8 @@ EOF
 
 # should_wrap: 0 only when a password prompt on the remote host can reach the pane.
 should_wrap() {
+  # The shim stays on PATH for the whole session; this live switch is remoteHosts.
+  [ "${CC_ASKPASS_WRAP:-}" = 1 ] || return 1
   listener_alive || return 1
   # The relay asks the askpass beside this file; one that SSH_ASKPASS does not name is not ours to use.
   [ "${SSH_ASKPASS:-}" = "$lib/askpass" ] || return 1

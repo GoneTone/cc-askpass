@@ -111,7 +111,7 @@ session 開始時，mod 會啟動一個小型監聽程式（`bin/askpass --serve
 - 使用者自行安裝（不屬於 root）的 ssh 不會有遠端提示。
 - 遠端主機的登入設定檔（rc 檔）若會輸出到 stdout，檢查會失敗，指令照常執行，沒有遠端提示。
 - ssh 的選項值或主機名稱含有空白時（`-o "User alice"`），該指令沒有遠端提示；請改寫成 `-o User=alice`。
-- 監聽程式執行期間，PreToolUse hook 和 auto 模式的分類器看到的 Bash 指令會帶著 `export PATH='…/bin/shim':"$PATH"; ` 前綴；權限規則則是比對原本的指令。
+- Claude 的 Bash 指令執行時，PATH 最前面會是 `…/bin/shim`（在 session 開始時設定，不會改動指令本身）。裡面只有 ssh 包裝程式，`remoteHosts` 關閉時它會直接放行。
 
 ## 移除
 

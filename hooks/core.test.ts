@@ -17,7 +17,7 @@ import {
   parseRequest,
   relayHost,
   relayWrapperHost,
-  pathPrefix,
+  withShim,
   remoteLabel,
   stripControl,
   wrapperTarget,
@@ -131,9 +131,14 @@ test('stripControl drops invisible format and bidi characters', () => {
   expect(stripControl('a\u200bb\u200fc\u202ad\u202ee\u2066f\u2069g\u2028h\u2029i')).toBe('abcdefghi')
 })
 
-test('pathPrefix single-quotes the root', () => {
-  expect(pathPrefix('/opt/p')).toBe(`export PATH='/opt/p/bin/shim':"$PATH"; `)
-  expect(pathPrefix(`/opt/it's`)).toBe(`export PATH='/opt/it'\\''s/bin/shim':"$PATH"; `)
+test('withShim puts the directory first, once', () => {
+  expect(withShim('/usr/bin:/bin', '/p/bin/shim')).toBe('/p/bin/shim:/usr/bin:/bin')
+  expect(withShim(undefined, '/p/bin/shim')).toBe('/p/bin/shim')
+  expect(withShim('', '/p/bin/shim')).toBe('/p/bin/shim')
+  // A reload finds PATH as the last load left it.
+  expect(withShim('/p/bin/shim:/usr/bin', '/p/bin/shim')).toBe(null)
+  expect(withShim('/x:/p/bin/shim:/usr/bin', '/p/bin/shim')).toBe(null)
+  expect(withShim('/p/bin/shim2:/usr/bin', '/p/bin/shim')).toBe('/p/bin/shim:/p/bin/shim2:/usr/bin')
 })
 
 test('parseHelperPs reads ppid and args', () => {

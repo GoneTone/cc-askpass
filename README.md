@@ -111,7 +111,7 @@ For ssh, the mod also puts a small `ssh` wrapper first on the PATH of the comman
 - A user-installed (not root-owned) ssh means no remote prompts.
 - A login rc file on the remote host that prints to stdout makes the check fail, and the command runs without remote prompts.
 - An ssh option value or host with a space in it (`-o "User alice"`) means no remote prompts for that command; write `-o User=alice` instead.
-- While the listener runs, PreToolUse hooks and the auto-mode classifier see Bash commands with the `export PATH='…/bin/shim':"$PATH"; ` prefix; permission rules are matched against the original command.
+- Claude's Bash commands run with `…/bin/shim` first on PATH (set when the session starts, so commands are not changed). It holds only the ssh wrapper, which steps aside when `remoteHosts` is off.
 
 ## Uninstall
 

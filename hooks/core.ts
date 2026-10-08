@@ -62,12 +62,10 @@ export function remoteLabel(host: string, via: string | null): string {
   return via.endsWith(` via ${host}`) ? via : `${via} via ${host}`
 }
 
-/**
- * What goes before a Bash command so it finds our ssh wrapper first: after the snapshot's own
- * `export PATH`, so the command and its children (rsync, git, scripts) inherit it.
- */
-export function pathPrefix(root: string): string {
-  return `export PATH='${`${root}/bin/shim`.replaceAll(`'`, `'\\''`)}':"$PATH"; `
+/** `path` with `dir` first, or null when `dir` is already on it (a reload). */
+export function withShim(path: string | undefined, dir: string): string | null {
+  if (path === undefined || path === '') return dir
+  return path.split(':').includes(dir) ? null : `${dir}:${path}`
 }
 
 // ssh's options as getopts takes them (a colon after a letter that takes a value).

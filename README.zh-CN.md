@@ -111,7 +111,7 @@ Claude 的 Bash 命令 → sudo → bin/askpass → 请求 FIFO → cc-askpass m
 - 用户自行安装（不属于 root）的 ssh 不会有远程提示。
 - 远程主机的登录配置文件（rc 文件）如果向 stdout 输出内容，检查会失败，命令照常运行，没有远程提示。
 - ssh 的选项值或主机名含有空格时（`-o "User alice"`），该命令没有远程提示；请改写成 `-o User=alice`。
-- 监听程序运行期间，PreToolUse hook 和 auto 模式的分类器看到的 Bash 命令会带有 `export PATH='…/bin/shim':"$PATH"; ` 前缀；权限规则则是匹配原始命令。
+- Claude 的 Bash 命令运行时，PATH 最前面是 `…/bin/shim`（在会话开始时设置，不会改动命令本身）。里面只有 ssh 包装程序，`remoteHosts` 关闭时它会直接放行。
 
 ## 卸载
 
