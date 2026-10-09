@@ -320,7 +320,7 @@ mkfifo "$tmp/base/cc-askpass-$tok/req"
 sh -c "printf '%s\tPassword: \tsudo\treported\n' \$\$ > '$tmp/base/cc-askpass-$tok/req'; printf 'x\ty\n' > '$tmp/base/cc-askpass-$tok/req'; echo stop > '$tmp/base/cc-askpass-$tok/req'" &
 CCAP_TEST_BASES="$tmp/base" sh "$root/bin/remote.sh" relay "$tok" > "$tmp/out" 2> "$tmp/err"
 wait
-[ "$(wc -l < "$tmp/out")" = 1 ] || fail "out: $(cat "$tmp/out")"
+[ "$(wc -l < "$tmp/out")" -eq 1 ] || fail "out: $(cat "$tmp/out")"
 case $(cat "$tmp/out") in *"$(printf '\tPassword: \tsudo\treported')") ;; *) fail "out: $(cat "$tmp/out")" ;; esac
 teardown
 
@@ -456,7 +456,7 @@ teardown
 setup 'serve-stdin relays and answers'
 serve_up
 helper 123
-await '[ "$(wc -l < "$tmp/out")" = 2 ]' || fail "out: $(cat "$tmp/out")"
+await '[ "$(wc -l < "$tmp/out")" -eq 2 ]' || fail "out: $(cat "$tmp/out")"
 [ "$(sed -n 2p "$tmp/out")" = "$(printf '123\tP\t\t')" ] || fail "out: $(cat "$tmp/out")"
 printf '123\tpw\n' >&5
 await '[ "$(cat "$tmp/got" 2> /dev/null)" = pw ]' || fail "got: $(cat "$tmp/got")"
@@ -466,7 +466,7 @@ teardown
 setup 'reply keeps tabs and edge spaces'
 serve_up
 helper 123
-await '[ "$(wc -l < "$tmp/out")" = 2 ]'
+await '[ "$(wc -l < "$tmp/out")" -eq 2 ]'
 printf '123\t  a\tb  \n' >&5
 await '[ -s "$tmp/got" ]'
 printf '  a\tb  \n' | cmp -s - "$tmp/got" || fail "got: $(cat "$tmp/got")"
@@ -726,7 +726,8 @@ case $out in test-pw*) ;; *) fail "out: $out" ;; esac
 
   e2e_test 'ignores a caller -S'
   ssh -F "$cfg" -M -S "$e2e/caller.ctl" -o ControlPersist=yes -N -f localhost
-  out=$(wssh -F "$cfg" -S "$e2e/caller.ctl" localhost "pgrep -f -- 'ControlMaster=yes -S $ldir/s\\.' > /dev/null && echo private")
+  # Our socket is in $ldir, or in /tmp/ccap.* where $ldir is long (macOS's TMPDIR).
+  out=$(wssh -F "$cfg" -S "$e2e/caller.ctl" localhost "pgrep -f -- 'ControlMaster=yes -S ($ldir/s\\.|/tmp/ccap\\.)' > /dev/null && echo private")
   [ "$out" = private ] || fail "out: $out"
   ssh -S "$e2e/caller.ctl" -O check localhost 2> /dev/null || fail 'caller master closed'
   ssh -S "$e2e/caller.ctl" -O exit localhost 2> /dev/null
@@ -827,7 +828,7 @@ case $out in test-pw*) ;; *) fail "out: $out" ;; esac
   done
   # No stop reaches the remote side: the wrapper and its master die at once.
   kill -KILL "$killed"
-  pkill -KILL -f -- "-S $ldir/s\."
+  pkill -KILL -f -- "-S ($ldir/s\.|/tmp/ccap\.)"
   wait "$killed" 2> /dev/null
   sleep 0.5
   pkill -f "^sleep 32$"

@@ -8,6 +8,9 @@ $source = Join-Path $root 'win\cc-askpass.cs'
 $buildScript = Join-Path $root 'win\build.ps1'
 $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $utf8 = New-Object System.Text.UTF8Encoding $false
+# On a UTF-8 console (CI's) .NET Framework puts a BOM ahead of every stdin it redirects, as the
+# helper's own replies would get one: the same code page without it.
+if ([Console]::InputEncoding.CodePage -eq 65001) { [Console]::InputEncoding = $utf8 }
 $started = New-Object System.Collections.ArrayList
 $current = 'setup'
 $code = 0
