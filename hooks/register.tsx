@@ -30,6 +30,7 @@ import {
   splitLines,
   fnv1a64,
   winClaudeCommand,
+  winMsysShell,
   winRequester,
 } from './core'
 
@@ -262,7 +263,10 @@ async function findClaudeCommand(
   requester: Requester,
   ancestors: WinRequest['ancestors'],
 ): Promise<string | null> {
-  if (isWin) return winClaudeCommand(ancestors, recentBashCommands, runningPowerShell)
+  if (isWin) {
+    const command = winClaudeCommand(ancestors, recentBashCommands, runningPowerShell)
+    return command ?? (await winMsysClaudeCommand($, ancestors))
+  }
   const claudePid = claudePidOf(sessionDir)
   if (claudePid === null || recentBashCommands.length === 0) return null
   try {
@@ -272,6 +276,25 @@ async function findClaudeCommand(
   } catch (error) {
     // Only context for the pane: a failure here must not block the request.
     log($, `could not find the Bash command: ${String(error)}`)
+    return null
+  }
+}
+
+/** A Bash call whose Windows ancestors stop at a script Git Bash forked: found by the MSYS parents. */
+async function winMsysClaudeCommand($: EngineInterface, ancestors: WinRequest['ancestors']): Promise<string | null> {
+  const sh = winMsysShell(ancestors)
+  if (sh === null || recentBashCommands.length === 0) return null
+  try {
+    const pids = ancestors.toReversed().map(({ pid }) => String(pid))
+    const walk = await $.process.run([sh, `${$.plugin.root}\\bin\\msys-parents`, ...pids])
+    for (const line of walk.stdout.split('\n').toReversed()) {
+      const command = matchBashCommand(line, recentBashCommands)
+      if (command !== null) return command
+    }
+    return null
+  } catch (error) {
+    // Only context for the pane: a failure here must not block the request.
+    log($, `could not walk the MSYS parents: ${String(error)}`)
     return null
   }
 }

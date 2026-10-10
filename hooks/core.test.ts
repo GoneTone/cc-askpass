@@ -30,6 +30,7 @@ import {
   parseWinLine,
   winAskSource,
   winClaudeCommand,
+  winMsysShell,
   winRequester,
   type WinRequest,
 } from './core'
@@ -244,6 +245,16 @@ test('matchBashCommand undoes the shell quoting and takes the longest whole quot
   )
 })
 
+test('matchBashCommand takes a command the tool passed unquoted', () => {
+  // A command with nothing to quote is passed as one bare word after eval.
+  const shell = `/bin/bash -c source /x && eval ./install.sh < /dev/null && pwd -P >| /tmp/claude-1-cwd`
+  expect(matchBashCommand(shell, ['ls', './install.sh'])).toBe('./install.sh')
+  expect(matchBashCommand(`eval ./install.sh`, ['./install.sh'])).toBe('./install.sh')
+  // The whole word still: neither a shorter command nor a prefix of it.
+  expect(matchBashCommand(shell, ['ls', './install'])).toBe(null)
+  expect(matchBashCommand(`eval ./install.sh.bak < /dev/null`, ['./install.sh'])).toBe(null)
+})
+
 test('claudePidOf reads the pid the session dir is named after', () => {
   expect(claudePidOf('/run/user/1000/cc-askpass/0d1c-26322')).toBe(26322)
   expect(claudePidOf('')).toBe(null)
@@ -418,4 +429,16 @@ test('winClaudeCommand matches Bash calls, then a single PowerShell call', () =>
   expect(winClaudeCommand(pwsh, [], ['ssh h'])).toBe('ssh h')
   expect(winClaudeCommand(pwsh, [], ['ssh h', 'git push'])).toBe(null)
   expect(winClaudeCommand([{ pid: 2, args: 'ssh h' }], [], ['ssh h'])).toBe(null)
+})
+
+test('winMsysShell names the sh.exe beside the outermost MSYS ancestor', () => {
+  const ancestors = [
+    { pid: 2, args: 'ssh h' },
+    { pid: 3, args: `"C:\\Program Files\\Git\\usr\\bin\\sh.exe" ./deploy.sh` },
+    { pid: 4, args: 'C:\\Tools\\Git\\usr\\bin\\bash.exe ./outer.sh' },
+  ]
+  expect(winMsysShell(ancestors)).toBe('C:\\Tools\\Git\\usr\\bin\\sh.exe')
+  expect(winMsysShell(ancestors.slice(0, 2))).toBe('C:\\Program Files\\Git\\usr\\bin\\sh.exe')
+  // Windows OpenSSH and the PowerShell tool are no MSYS programs.
+  expect(winMsysShell([{ pid: 2, args: 'C:\\Windows\\System32\\OpenSSH\\ssh.exe h' }, { pid: 3, args: 'pwsh -Command x' }])).toBe(null)
 })

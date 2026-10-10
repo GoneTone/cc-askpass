@@ -1,0 +1,23 @@
+#!/bin/sh
+# msys-parents <winpid>...: Windows only, run by Git for Windows' sh. Print the command line of
+# the first of these Windows pids that is an MSYS process, then of each of its MSYS parents, one
+# per line. Git Bash running a script forks and execs, and Windows forgets the script's parent;
+# MSYS keeps it, so this reaches the Bash tool's shell where the Windows ancestors stop.
+# Started from Windows, sh has no /usr/bin on PATH for tr.
+PATH=/usr/bin:$PATH
+for winpid in "$@"; do
+  for dir in /proc/[0-9]*; do
+    read -r w 2> /dev/null < "$dir/winpid" || continue
+    [ "$w" = "$winpid" ] || continue
+    pid=${dir#/proc/}
+    n=0
+    while [ "$n" -lt 32 ] && [ -r "/proc/$pid/cmdline" ]; do
+      tr '\0' ' ' < "/proc/$pid/cmdline"
+      echo
+      read -r pid 2> /dev/null < "/proc/$pid/ppid" || break
+      n=$((n + 1))
+    done
+    exit 0
+  done
+done
+exit 1

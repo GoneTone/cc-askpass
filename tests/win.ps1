@@ -759,6 +759,33 @@ try {
     'SKIP: no Git for Windows MSYS runtime, so no MSYS ssh tests'
   }
 
+  # Git Bash running a script forks and execs: Windows loses the script's parent, MSYS keeps it.
+  $gitSh = Join-Path $gitBin 'sh.exe'
+  if (Test-Path -LiteralPath $gitSh) {
+    Test 'msys-parents walks up past a forked script' {
+      $script = Join-Path $tmp 'deploy.sh'
+      [IO.File]::WriteAllText($script, "#!/bin/sh`nsleep 30`n")
+      # sh.exe started from Windows has no /usr/bin on PATH, which Git Bash gives it.
+      $outer = Start-Program $gitSh @('-c', 'true && eval ./deploy.sh < /dev/null') @{ PATH = "$gitBin;$env:PATH" }
+      $sleep = $null
+      for ($i = 0; $i -lt 50 -and $sleep -eq $null; $i++) {
+        Start-Sleep -Milliseconds 100
+        $sleep = Get-CimInstance Win32_Process -Filter "Name='sleep.exe'" | Where-Object { $_.CommandLine -match 'sleep(\.exe")? 30$' } | Select-Object -First 1
+      }
+      Check ($sleep -ne $null) "the script never started sleep: $(if ($outer.P.HasExited) { Get-Stderr $outer })"
+      # As the mod runs it: sh.exe straight from Windows, no Git directory on PATH.
+      $bare = @{ PATH = "$env:SystemRoot\System32" }
+      $result = Wait-Program (Start-Program $gitSh @((Join-Path $root 'bin\msys-parents'), '1', "$($sleep.ProcessId)") $bare)
+      $lines = $result.Out -split "`n" | Where-Object { $_ }
+      Check ($result.Code -eq 0 -and $lines[0] -match '^sleep 30') "msys-parents printed '$($result.Out)': $($result.Err)"
+      Check (@($lines -match '^\S*sh -c true && eval \./deploy\.sh < /dev/null').Count -eq 1) "no outer shell in '$($result.Out)'"
+      $result = Wait-Program (Start-Program $gitSh @((Join-Path $root 'bin\msys-parents'), '1') $bare)
+      Check ($result.Code -eq 1 -and $result.Out -ceq '') "an unknown pid printed '$($result.Out)'"
+      Stop-Process -Id $sleep.ProcessId -Force
+      $null = Wait-Program $outer
+    }
+  }
+
   # Optional: CC_ASKPASS_TEST_SSH names a reachable host with key login, e.g.
   # 'gonetone@127.0.0.1 -p 2299 -i C:\key -o StrictHostKeyChecking=no'.
   if ($env:CC_ASKPASS_TEST_SSH) {

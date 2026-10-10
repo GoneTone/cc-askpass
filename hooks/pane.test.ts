@@ -807,11 +807,15 @@ type WinLine = {
  * A native Windows session with a ready listener that emits JSON request lines; the listener
  * reports running from `helper` (by default where the mod built it).
  */
-async function winWorld($: any, on: any, { helper }: { helper?: string } = {}) {
+async function winWorld(
+  $: any,
+  on: any,
+  { helper, answer }: { helper?: string; answer?: Parameters<typeof recorder>[1] } = {},
+) {
   const clock = mock.clock(on)
-  windowsWorld(on)
+  const win = windowsWorld(on)
   const serve = fakeServe(on)
-  const rec = recorder(on)
+  const rec = recorder(on, answer)
   // Stands in for the shell tools: a PowerShell call runs until the test ends it.
   const running = new Map<string, () => void>()
   on('tool.call', (_$: unknown, e: { tool: string; command: string }) => {
@@ -829,6 +833,7 @@ async function winWorld($: any, on: any, { helper }: { helper?: string } = {}) {
     clock,
     rec,
     exe,
+    root: win.root,
     shim: exe.replace(/cc-askpass\.exe$/, 'shim\\ssh.exe'),
     /** Request `id` from `line`; by default our helper asking for Windows OpenSSH (pid 5100). */
     async request(id: number, line: WinLine = {}) {
@@ -1038,6 +1043,21 @@ test('Claude ran from a Bash call on Windows', async ($, on) => {
   await w.request(1, { ancestors: [{ pid: 5100, args: 'ssh server true' }, { pid: 5000, args: shell }] })
   const ui = await w.mount()
   expect((await ui.find({ type: 'Text', text: /^Claude ran:/ }))?.text).toBe('Claude ran: ssh server true && echo ok')
+})
+
+test('Claude ran from a script a Bash call runs on Windows, through the MSYS parents', async ($, on) => {
+  const sh = 'C:\\Program Files\\Git\\usr\\bin\\sh.exe'
+  // Git Bash forked and exec'd the script: its Windows parent is gone, its MSYS parents are not.
+  const w = await winWorld($, on, {
+    answer: argv =>
+      argv[0] === sh ? { stdout: '/bin/sh ./deploy.sh \nbash -c source /x && eval ./deploy.sh < /dev/null \n' } : undefined,
+  })
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh' } as never)
+  await w.request(1, { ancestors: [{ pid: 5100, args: 'ssh server true' }, { pid: 5050, args: `"${sh}" ./deploy.sh` }] })
+  const ui = await w.mount()
+  expect((await ui.find({ type: 'Text', text: /^Claude ran:/ }))?.text).toBe('Claude ran: ./deploy.sh')
+  const walk = w.rec.runs.find(run => run.argv[0] === sh)
+  expect(walk?.argv.slice(1)).toEqual([`${w.root()}\\bin\\msys-parents`, '5050', '5100'])
 })
 
 test('password never leaks on Windows', async ($, on) => {

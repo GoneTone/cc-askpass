@@ -230,6 +230,19 @@ export function winClaudeCommand(
 }
 
 /**
+ * Git's sh.exe, beside the outermost ancestor that runs an MSYS program (`…\usr\bin\x.exe`):
+ * it can walk the MSYS parents (bin/msys-parents) that Windows lost when Git Bash forked.
+ */
+export function winMsysShell(ancestors: WinRequest['ancestors']): string | null {
+  for (const { args } of ancestors.toReversed()) {
+    const exe = /^"([^"]+)"|^(\S+)/.exec(args)
+    const path = exe?.[1] ?? exe?.[2] ?? ''
+    if (/\\usr\\bin\\[^\\]+\.exe$/i.test(path)) return path.replace(/[^\\]+\.exe$/i, 'sh.exe')
+  }
+  return null
+}
+
+/**
  * `text` without C0 and C1 control characters (ESC included) and the invisible format and
  * bidi characters that reorder or hide text: remote text must not drive the terminal or
  * disguise itself.
@@ -351,15 +364,16 @@ export function bashShellArgs(table: PsTable, pid: number, claudePid: number): s
 
 /**
  * Which of Claude's recent Bash commands that shell runs. The tool passes the command
- * single-quoted, a quote inside written as '"'"'; the whole quoted word must match, so
- * `ls` does not stand in for `./tools/setup.sh`, and the longest match wins, so
- * `apt update` does not stand in for `sudo sh -c 'apt update'`.
+ * single-quoted, a quote inside written as '"'"', or, with nothing to quote, as a bare word
+ * after `eval`; the whole word must match, so `ls` does not stand in for `./tools/setup.sh`,
+ * and the longest match wins, so `apt update` does not stand in for `sudo sh -c 'apt update'`.
  */
 export function matchBashCommand(shellArgs: string, recent: readonly string[]): string | null {
-  const unquoted = shellArgs.replaceAll(`'"'"'`, `'`)
+  const unquoted = `${shellArgs.replaceAll(`'"'"'`, `'`)} `
   let best: string | null = null
   for (const command of recent) {
-    if (unquoted.includes(`'${command}'`) && command.length > (best?.length ?? 0)) best = command
+    const isRun = unquoted.includes(`'${command}'`) || unquoted.includes(`eval ${command} `)
+    if (isRun && command.length > (best?.length ?? 0)) best = command
   }
   return best
 }
