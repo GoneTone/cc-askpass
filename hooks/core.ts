@@ -30,6 +30,10 @@ export function askedByLine(source: AskSource): string {
 
 const firstLine = (out: string): string => out.split('\n')[0] ?? ''
 
+/** `args` cut to MAX_COMMAND_LENGTH, an ellipsis marking the cut. */
+const clipCommand = (args: string): string =>
+  args.length > MAX_COMMAND_LENGTH ? `${args.slice(0, MAX_COMMAND_LENGTH)}…` : args
+
 /** Splits streamed text into complete lines; `rest` is the unterminated tail. */
 export function splitLines(rest: string, chunk: string): { lines: string[]; rest: string } {
   const lines = (rest + chunk).split('\n')
@@ -202,7 +206,7 @@ export function winRequester(request: WinRequest, helperExe: string): Requester 
     pid: asker.pid,
     isSudo: false,
     comm: (stripControl(asker.exe).split(/[\\/]/).at(-1) ?? '').replace(/\.exe$/i, '') || 'unknown program',
-    command: args.length > MAX_COMMAND_LENGTH ? `${args.slice(0, MAX_COMMAND_LENGTH)}…` : args,
+    command: clipCommand(args),
     askedBy,
   }
 }
@@ -259,8 +263,7 @@ export function parseParentPs(out: string, pid: number): Omit<Requester, 'askedB
   const [, user, commPath, args] = /^\s*(\S+)\s+(\S+)\s+(.*?)\s*$/.exec(firstLine(out)) ?? []
   if (user === undefined || commPath === undefined || args === undefined) return null
   const comm = commPath.split('/').at(-1) ?? commPath
-  const command = args.length > MAX_COMMAND_LENGTH ? `${args.slice(0, MAX_COMMAND_LENGTH)}…` : args
-  return { pid, isSudo: user === 'root' && comm === 'sudo', comm, command }
+  return { pid, isSudo: user === 'root' && comm === 'sudo', comm, command: clipCommand(args) }
 }
 
 /** A prompt for the line above the field, its trailing colon (and blanks) dropped. */
@@ -316,12 +319,9 @@ export class AnsweredPids {
   }
 }
 
-export type ExeInfo = { uid: number; path: string }
-
-/** `<owner uid> <path>` of a process's resolved executable. */
-export function parseExeInfo(out: string): ExeInfo | null {
-  const [, uid, path] = /^(\d+) (.+)$/.exec(firstLine(out)) ?? []
-  return uid === undefined || path === undefined ? null : { uid: Number(uid), path }
+/** The path of a process's resolved executable (bin/exe-of). */
+export function parseExePath(out: string): string | null {
+  return firstLine(out) || null
 }
 
 export type PsTable = Map<number, { ppid: number; args: string }>
@@ -351,14 +351,15 @@ export function bashShellArgs(table: PsTable, pid: number, claudePid: number): s
 
 /**
  * Which of Claude's recent Bash commands that shell runs. The tool passes the command
- * single-quoted, a quote inside written as '"'"'; the longest match wins, so `true`
- * does not stand in for `sudo -k && sudo true`.
+ * single-quoted, a quote inside written as '"'"'; the whole quoted word must match, so
+ * `ls` does not stand in for `./tools/setup.sh`, and the longest match wins, so
+ * `apt update` does not stand in for `sudo sh -c 'apt update'`.
  */
 export function matchBashCommand(shellArgs: string, recent: readonly string[]): string | null {
   const unquoted = shellArgs.replaceAll(`'"'"'`, `'`)
   let best: string | null = null
   for (const command of recent) {
-    if (unquoted.includes(command) && command.length > (best?.length ?? 0)) best = command
+    if (unquoted.includes(`'${command}'`) && command.length > (best?.length ?? 0)) best = command
   }
   return best
 }

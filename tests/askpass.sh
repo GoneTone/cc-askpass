@@ -312,12 +312,12 @@ test_restarted_serve_drops_dead_requests() {
 }
 
 test_exe_of_names_a_live_process() {
-  setup 'exe-of prints the owner and path of a live process'
+  setup 'exe-of prints the path of a live process'
   sleep 30 &
   sleeper=$!
   line=$("$root/bin/exe-of" "$sleeper") || fail 'exe-of failed for a live pid'
   case "$line" in
-    "0 "*/sleep) ;;
+    /*/sleep) ;;
     *) fail "exe-of printed: $line" ;;
   esac
   kill "$sleeper"

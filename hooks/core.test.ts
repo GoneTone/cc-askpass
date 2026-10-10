@@ -229,13 +229,19 @@ test('bashShellArgs finds the ancestor Claude started', () => {
   expect(bashShellArgs(TABLE, 99999, 900)).toBe(null)
 })
 
-test('matchBashCommand undoes the shell quoting and prefers the longest match', () => {
+test('matchBashCommand undoes the shell quoting and takes the longest whole quoted command', () => {
   const shell = `/bin/bash -c source /x && eval 'timeout 25 tail -f /dev/null; echo "it'"'"'s done"' < /dev/null`
   expect(matchBashCommand(shell, ['ls', `timeout 25 tail -f /dev/null; echo "it's done"`])).toBe(
     `timeout 25 tail -f /dev/null; echo "it's done"`,
   )
   expect(matchBashCommand(`eval 'sudo -k && sudo true'`, ['true', 'sudo -k && sudo true'])).toBe('sudo -k && sudo true')
   expect(matchBashCommand(`eval 'make install'`, ['ls', 'pwd'])).toBe(null)
+  // A command that fell out of the recent list: a shorter one inside it is not it.
+  expect(matchBashCommand(`eval './tools/setup.sh'`, ['ls'])).toBe(null)
+  // An earlier command quoted inside the one that runs is not it either.
+  expect(matchBashCommand(`eval 'sudo sh -c '"'"'apt update'"'"''`, ['apt update', `sudo sh -c 'apt update'`])).toBe(
+    `sudo sh -c 'apt update'`,
+  )
 })
 
 test('claudePidOf reads the pid the session dir is named after', () => {

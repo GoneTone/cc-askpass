@@ -84,7 +84,7 @@ async function world($: any, on: any) {
       ps.set(`helper:${id}`, `4100 /bin/sh ${askpass} ${line.prompt}`)
       ps.set('parent:4100', `alice ssh ${relayArgs}`)
       // The relay is a script: its executable is the shell.
-      exes.set('4100', '0 /usr/bin/dash')
+      exes.set('4100', '/usr/bin/dash')
       alive.add(id)
       alive.add(4100)
       // The Bash tool's shell from `bashCall`, or one that ran something else.
@@ -96,12 +96,12 @@ async function world($: any, on: any) {
     },
     /**
      * Sets up helper `id`, child of `parentPid`, asking with `prompt`; `exe` is the
-     * parent's `<owner uid> <executable>` (a root-owned /usr/bin/<comm> by default; null: unknown).
+     * parent's executable (/usr/bin/<comm> by default; null: unknown).
      */
     stage(id: number, parentPid: number, prompt: string, parentPs: string, options: { helperArgs?: string; exe?: string | null } = {}) {
       ps.set(`helper:${id}`, `${parentPid} ${options.helperArgs ?? `/bin/sh ${askpass} ${prompt}`}`)
       ps.set(`parent:${parentPid}`, parentPs)
-      if (options.exe !== null) exes.set(String(parentPid), options.exe ?? `0 /usr/bin/${parentPs.split(/\s+/)[1]}`)
+      if (options.exe !== null) exes.set(String(parentPid), options.exe ?? `/usr/bin/${parentPs.split(/\s+/)[1]}`)
       alive.add(id)
       return `${id}\t${prompt}\n`
     },
@@ -395,14 +395,14 @@ test('a failing pane open keeps the request for /askpass', async ($, on) => {
 
 test('askpass run from a shell shows the shell', async ($, on) => {
   const w = await world($, on)
-  await w.request(7000, 6900, SUDO_PROMPT, 'alice bash bash -c x', { exe: '1000 /usr/bin/bash' })
+  await w.request(7000, 6900, SUDO_PROMPT, 'alice bash bash -c x', { exe: '/usr/bin/bash' })
   expect(w.rec.opens).toHaveLength(1)
   expect((await (await w.mount('terminal')).find({ text: /^Asked by:/ }))?.text).toBe('Asked by: /usr/bin/bash')
 })
 
 test('a user-owned client shows its path', async ($, on) => {
   const w = await world($, on)
-  await w.request(7000, 6900, 'Enter passphrase for key: ', 'alice ssh ssh -T host', { exe: '1000 /tmp/ssh' })
+  await w.request(7000, 6900, 'Enter passphrase for key: ', 'alice ssh ssh -T host', { exe: '/tmp/ssh' })
   expect(w.rec.opens).toHaveLength(1)
   expect((await (await w.mount('terminal')).find({ text: /^Asked by:/ }))?.text).toBe('Asked by: /tmp/ssh')
 })

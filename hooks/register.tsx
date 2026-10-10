@@ -12,7 +12,7 @@ import {
   matchBashCommand,
   parsePsTable,
   isOurHelper,
-  parseExeInfo,
+  parseExePath,
   parseHelperPs,
   parseParentPs,
   parseReady,
@@ -250,9 +250,9 @@ async function enqueue(
 async function programOf($: EngineInterface, parent: Omit<Requester, 'askedBy'>): Promise<AskSource> {
   const host = relayHost(parent.command, `${$.plugin.root}/bin/shim/ssh`)
   if (host !== null) return { kind: 'relay', host, realSsh: null }
-  // `<owner uid> <path>` of the parent's executable (bin/exe-of).
+  // The path of the parent's executable (bin/exe-of).
   const exe = await $.process.run(['sh', `${$.plugin.root}/bin/exe-of`, String(parent.pid)])
-  const path = exe.exitCode === 0 ? parseExeInfo(exe.stdout)?.path : undefined
+  const path = exe.exitCode === 0 ? parseExePath(exe.stdout) : null
   return { kind: 'program', exe: stripControl(path ?? (parent.isSudo ? 'sudo (root)' : parent.comm)) }
 }
 
