@@ -323,6 +323,11 @@ test_exe_of_names_a_live_process() {
   kill "$sleeper"
   wait "$sleeper" 2> /dev/null
   "$root/bin/exe-of" "$sleeper" > /dev/null 2>&1 && fail 'exe-of succeeded for a dead pid'
+  # lsof reports a process it may not read (root's sudo) with an error in the name field.
+  mkdir "$tmp/fakebin"
+  printf '#!/bin/sh\necho p1\necho "n/proc/1/exe (readlink: Permission denied)"\n' > "$tmp/fakebin/lsof"
+  chmod +x "$tmp/fakebin/lsof"
+  line=$(PATH="$tmp/fakebin:$PATH" "$root/bin/exe-of" 999999) && fail "exe-of printed lsof's error: $line"
   teardown
 }
 
