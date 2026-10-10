@@ -187,8 +187,9 @@ line with `CCAP_RS_B64` only, followed by ` _ relay <token>`, ` _ reply <token> 
 The remote `sudo` wrapper finds the real sudo the same way as the ssh wrapper and adds `-A`
 unless `-A`, `-S`, `-n` (or long forms) are present among its options; the value of an option
 that takes one (`-u root`, `--user root`, `--prompt x` …) is skipped, not taken for the command. With `-A`, sudo uses askpass even under
-`ssh -tt`. Calls to `/usr/bin/sudo` by absolute path skip the wrapper; they have no terminal
-in the non-`-t` case and still find `SUDO_ASKPASS`.
+`ssh -tt`. Calls to `/usr/bin/sudo` by absolute path skip the wrapper, so they get no `-A`.
+Without a terminal sudo uses `SUDO_ASKPASS` only when `DISPLAY` is set, and the remote side
+sets none: they fail with "a terminal is required". Under `-t` they read the terminal.
 
 The remote `ssh` wrapper is `bin/shim/ssh` itself. On the remote its "local listener" is the
 remote askpass: a request from a further hop goes up through the remote askpass, the relay of
