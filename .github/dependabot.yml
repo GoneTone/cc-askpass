@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # The repo has no package manifest; the workflows' actions are its only dependencies.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Taipei"
+    open-pull-requests-limit: 30
+    commit-message:
+      prefix: "chore"
+      prefix-development: "chore"
+      include: "scope"
+    cooldown:
+      default-days: 7
