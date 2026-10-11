@@ -381,11 +381,13 @@ async function winWorld(
     isBuilt?: boolean | (() => boolean)
     source?: string | null
     env?: Record<string, string>
+    store?: Record<string, unknown>
     build?: Partial<ProcessRunResult> | { deny: string }
     check?: Partial<ProcessRunResult> | (() => Partial<ProcessRunResult> | undefined)
   } = {},
 ) {
   const clock = mock.clock(on)
+  mock.store(on, options.store)
   const win = windowsWorld(on, options)
   const serve = fakeServe(on)
   const rec = recorder(on, argv => {
@@ -489,6 +491,23 @@ test("a Windows listener that ends puts back the person's own ssh function", asy
   await w.ready()
   await w.stop()
   expect(w.rec.envValue('BASH_FUNC_ssh%%')).toBe(own)
+})
+
+test("a reload still puts back the person's own ssh function", async ($, on) => {
+  // The env holds the function an earlier load set; the store holds what that load found.
+  const own = '() {  command ssh -v "$@"\n}'
+  const ours = `() {  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' 'C:/old/shim/ssh.exe' "$@"\n}`
+  const w = await winWorld($, on, { env: { 'BASH_FUNC_ssh%%': ours }, store: { inheritedBashSsh: own } })
+  await w.ready()
+  await w.stop()
+  expect(w.rec.envValue('BASH_FUNC_ssh%%')).toBe(own)
+})
+
+test('a session without an own ssh function forgets the one stored before', async ($, on) => {
+  const w = await winWorld($, on, { store: { inheritedBashSsh: '() {  command ssh -v "$@"\n}' } })
+  await w.ready()
+  await w.stop()
+  expect(w.rec.envValue('BASH_FUNC_ssh%%')).toBe(undefined)
 })
 
 test('a second Windows start keeps its shim when the old listener gives up meanwhile', async ($, on) => {

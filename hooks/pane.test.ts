@@ -813,6 +813,7 @@ async function winWorld(
   { helper, answer }: { helper?: string; answer?: Parameters<typeof recorder>[1] } = {},
 ) {
   const clock = mock.clock(on)
+  mock.store(on)
   const win = windowsWorld(on)
   const serve = fakeServe(on)
   const rec = recorder(on, answer)

@@ -99,9 +99,9 @@ let sessionDir = ''
 let isWin = false
 // Windows: the build directory, and the listener's pipe, reply token and own image path once it is ready.
 let winOutDir = ''
-// Windows: the person's own exported `ssh` function, put back when ours goes.
-// ponytail: module state, so a hot reload forgets it; keep it in $.state if that matters.
-let inheritedBashSsh: string | undefined
+// Windows: the store key of the person's own exported `ssh` function, put back when ours goes.
+// In the store, not a module variable: after a hot reload the env holds ours, not theirs.
+const INHERITED_BASH_SSH = 'inheritedBashSsh'
 let winListener = { pipe: '', token: '', exe: '' }
 // Windows requests whose asker went away; the listener says so instead of `kill -0`.
 const goneIds = new Set<number>()
@@ -654,8 +654,10 @@ async function startWindows($: EngineInterface): Promise<boolean> {
   }
   winOutDir = built.outDir
   const before = await $.env.get('BASH_FUNC_ssh%%')
-  // An earlier load's function is ours; anything else is the person's and comes back later.
-  inheritedBashSsh = before !== undefined && !isBashSshFunction(before) ? before : undefined
+  // An earlier load's function is ours, and the person's is already in the store; anything
+  // else is the person's and comes back later.
+  if (before === undefined) await $.store.delete(INHERITED_BASH_SSH)
+  else if (!isBashSshFunction(before)) await $.store.set(INHERITED_BASH_SSH, before)
   // Git Bash's profile puts its /usr/bin (and its ssh) before the inherited PATH, so every bash
   // imports this as an `ssh` function instead; the two variables stop it rewriting `/x` arguments
   // into Windows paths.
@@ -668,7 +670,8 @@ async function startWindows($: EngineInterface): Promise<boolean> {
  * tool's snapshot keeps the function, where the wrapper passes through: CC_ASKPASS_WRAP is unset.
  */
 async function removeWinShim($: EngineInterface): Promise<void> {
-  await $.env.set('BASH_FUNC_ssh%%', inheritedBashSsh)
+  const inherited = await $.store.get(INHERITED_BASH_SSH)
+  await $.env.set('BASH_FUNC_ssh%%', typeof inherited === 'string' ? inherited : undefined)
   await $.env.set('PATH', withoutShim(await $.env.get('PATH'), `${winOutDir}\\shim`, ';'))
 }
 
