@@ -699,11 +699,14 @@ async function runServe($: EngineInterface): Promise<void> {
   stopServe = () => void serve.return(undefined as never)
 
   let isReady = false
+  let isDone = false
   let didGiveUp = false
   let lastError = ''
   const notStarted = () => $.ui.toast(`cc-askpass: the askpass listener did not start${lastError && `: ${lastError}`}`)
-  const readyTimer = $.clock.after(READY_TIMEOUT_MS, () => {
-    if (isReady || generation !== serveGeneration) return
+  // Never cancelled, only guarded: a cancelled timer slows every later `settle()` of the test
+  // kit's mock clock by a second (Claude Code 2.1.296).
+  $.clock.after(READY_TIMEOUT_MS, () => {
+    if (isReady || isDone || generation !== serveGeneration) return
     didGiveUp = true
     notStarted()
     stopServe()
@@ -727,7 +730,6 @@ async function runServe($: EngineInterface): Promise<void> {
         const ready = isWin ? parseWinReady(line) : parseReady(line)
         if (ready === null) continue
         isReady = true
-        readyTimer.cancel()
         if (typeof ready === 'string') sessionDir = ready
         else winListener = ready
         await setEnv($)
@@ -737,7 +739,7 @@ async function runServe($: EngineInterface): Promise<void> {
   } catch (error) {
     log($, `askpass listener failed: ${String(error)}`)
   }
-  readyTimer.cancel()
+  isDone = true
 
   if (generation !== serveGeneration) return
   if (!isReady) {
