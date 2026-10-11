@@ -21,7 +21,7 @@ sudo: a password is required
 
 ## 安裝
 
-需要 Claude Code 2.1.289 以上，支援 Linux、WSL、macOS 和 Windows。在 Claude Code 裡執行：
+需要 Claude Code 2.1.286 以上，支援 Linux、WSL、macOS 和 Windows。在 Claude Code 裡執行：
 
 ```
 /plugin marketplace add GoneTone/cc-askpass

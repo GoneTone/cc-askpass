@@ -21,7 +21,7 @@ So you end up running the command in your own terminal. Pasting the password int
 
 ## Install
 
-Needs Claude Code 2.1.289 or later, on Linux, WSL, macOS or Windows. Run these in Claude Code:
+Needs Claude Code 2.1.286 or later, on Linux, WSL, macOS or Windows. Run these in Claude Code:
 
 ```
 /plugin marketplace add GoneTone/cc-askpass
