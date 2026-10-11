@@ -27,7 +27,7 @@
       "type": "string",
       "multiple": true,
       "title": "Hosts to leave alone",
-      "description": "Glob patterns of ssh hosts whose commands are never wrapped",
+      "description": "Glob patterns of host names; ssh to a matching host runs untouched, so its password prompts stay out of the pane",
       "default": []
     }
   }
