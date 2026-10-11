@@ -3,6 +3,8 @@ name: CI
 on:
   push:
   pull_request:
+  # release.yml runs the whole CI through workflow_call as the gate before a release.
+  workflow_call:
 
 jobs:
   test:

@@ -1,0 +1,71 @@
+name: pin-marketplace
+
+# Once a release is published, pin the marketplace to its tag: new installs and
+# `claude plugin update` then get the released code, never what master has gained since. A
+# pre-release leaves the pin alone. Pressing Publish is a person's action, so this
+# `release: published` event fires as usual.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag to pin the marketplace to
+        required: true
+        type: string
+
+concurrency:
+  group: pin-marketplace
+  cancel-in-progress: false
+
+jobs:
+  pin:
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: master
+          fetch-depth: 0
+
+      # release.yml set the version; a release made another way may not have.
+      - name: Check the tag is a final release with its version in plugin.json
+        run: |
+          if [[ ! "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::notice::$TAG is not a final vX.Y.Z tag; the marketplace stays where it is"
+            exit 0
+          fi
+          version=$(git show "$TAG:.claude-plugin/plugin.json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])')
+          if [[ "$version" != "${BASH_REMATCH[1]}" ]]; then
+            echo "::error::$TAG has version $version in .claude-plugin/plugin.json, so updates would not see it; release it with release.yml"
+            exit 1
+          fi
+          echo "PIN=1" >> "$GITHUB_ENV"
+
+      - name: Pin the marketplace to the tag
+        if: env.PIN == '1'
+        run: |
+          python3 - << 'EOF'
+          import json, os
+          path = '.claude-plugin/marketplace.json'
+          with open(path) as f:
+              marketplace = json.load(f)
+          marketplace['plugins'][0]['source'] = {'source': 'github', 'repo': os.environ['REPO'], 'ref': os.environ['TAG']}
+          with open(path, 'w') as f:
+              json.dump(marketplace, f, indent=2)
+              f.write('\n')
+          EOF
+          if git diff --quiet -- .claude-plugin/marketplace.json; then
+            echo "the marketplace is already pinned to $TAG"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(release): pin the marketplace to $TAG [skip ci]" -- .claude-plugin/marketplace.json
+          git push origin HEAD:master

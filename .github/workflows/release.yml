@@ -1,0 +1,135 @@
+name: release
+run-name: release ${{ inputs.tag }}
+
+# Releasing (started by hand by a maintainer):
+#   1. Run the same CI as pushes, as the gate.
+#   2. Set .claude-plugin/plugin.json's version to the tag's on master and push it: updates only
+#      see a new version.
+#   3. Create a draft Release on that commit, its notes only GitHub's generated What's Changed.
+# The maintainer reviews the draft and presses Publish; pin-marketplace.yml then pins the
+# marketplace to the tag, so installs and updates get it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (vX.Y.Z, or vX.Y.Z-rc.N with pre-release checked)
+        required: true
+        type: string
+      prerelease:
+        description: Mark as pre-release (the marketplace stays on the last release)
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  draft:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    env:
+      TAG: ${{ inputs.tag }}
+      PRERELEASE: ${{ inputs.prerelease }}
+    steps:
+      - name: Validate tag
+        id: tag
+        run: |
+          if [[ ! "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
+            echo "::error::tag '$TAG' does not match vX.Y.Z or vX.Y.Z-<pre-release>"
+            exit 1
+          fi
+          if [[ -n "${BASH_REMATCH[2]}" && "$PRERELEASE" != "true" ]]; then
+            echo "::error::'$TAG' has a pre-release suffix, but pre-release is not checked"
+            exit 1
+          fi
+          if [[ -z "${BASH_REMATCH[2]}" && "$PRERELEASE" == "true" ]]; then
+            echo "::error::pre-release is checked, but '$TAG' has no pre-release suffix"
+            exit 1
+          fi
+          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to touch a published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null | grep -qx false; then
+            echo "::error::release '$TAG' is already published; it will not be modified"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          ref: master
+          fetch-depth: 0
+
+      # Only the top-level "version" line changes, so the rest of the file keeps its layout.
+      - name: Set plugin.json's version
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          python3 - << 'EOF'
+          import os, re
+          path = '.claude-plugin/plugin.json'
+          with open(path) as f:
+              text = f.read()
+          text = re.sub(r'"version": "[^"]*"', f'"version": "{os.environ["VERSION"]}"', text, count=1)
+          with open(path, 'w') as f:
+              f.write(text)
+          EOF
+
+      - name: Commit the version
+        id: commit
+        run: |
+          if git diff --quiet -- .claude-plugin/plugin.json; then
+            echo "plugin.json is already at $TAG"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore(release): bump version to $TAG [skip ci]" -- .claude-plugin/plugin.json
+            git push origin HEAD:master
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # The notes are only GitHub's generated What's Changed, made again from the current target on
+      # every run, so a rerun can overwrite them.
+      - name: Create or refresh the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --target "$SHA"
+          else
+            args=(--draft --title "$TAG" --target "$SHA" --generate-notes)
+            if [[ "$PRERELEASE" == "true" ]]; then
+              args+=(--prerelease)
+            fi
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" "${args[@]}"
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$TAG" -f target_commitish="$SHA" --jq .body > "$RUNNER_TEMP/notes.md"
+          gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/notes.md"
+
+  summary:
+    needs: draft
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag }}
+      SHA: ${{ needs.draft.outputs.sha }}
+    steps:
+      - run: |
+          {
+            echo "## Release $TAG"
+            echo
+            echo "- Release commit: \`$SHA\`"
+            echo "- Draft: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG — review, then Publish"
+          } >> "$GITHUB_STEP_SUMMARY"
