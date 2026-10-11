@@ -119,7 +119,7 @@ Defaults:你的使用者名稱 timestamp_type=global, timestamp_timeout=5
 - 非互動模式（`claude -p`、SDK）下沒有人能回答，cc-askpass 不會啟動，sudo 會和沒裝時一樣直接失敗。
 - 開啟 Bash 沙箱時，sudo 無法在沙箱內執行，會立刻失敗（Linux 上顯示「The "no new privileges" flag is set, which prevents sudo from running as root」，macOS 上顯示「operation not permitted: sudo」）。如果你允許 Claude 在沙箱外執行該指令，面板就會照常詢問。
 - ssh 的確認提示（`SSH_ASKPASS_PROMPT=confirm`）會以一般文字輸入的形式出現。
-- Windows：自己會開密碼視窗的程式（Git Credential Manager、Pageant）照舊用自己的視窗。
+- Windows：自己會開密碼視窗的程式（Git Credential Manager、Pageant）照舊用自己的視窗。關掉 Git Credential Manager 的視窗後，git 會改在面板裡詢問。
 - 在遠端主機上以完整路徑呼叫 sudo（例如 `/usr/bin/sudo`）時不會使用面板：沒有終端機時會直接失敗，在 `ssh -t` 底下則會讀取終端機。請直接寫 `sudo`。
 - 如果遠端主機的 shell 啟動檔（例如 `.bashrc`、`.zshenv`）在執行指令時會印出文字，像是歡迎訊息，cc-askpass 就無法確認這台主機是否適用。指令還是會照常執行，但那台主機上的 sudo 不會出現在面板。解決方法是讓那段文字只在互動式 shell 印出，或改印到 stderr。
 - ssh 指令中，主機名稱之前的選項或主機名稱本身如果含有空白，例如 `-o "User alice"` 或 `-i "/keys/my key"`，cc-askpass 就不會處理這個 ssh 指令，遠端主機上的 sudo 也就不會出現在面板。`-o` 選項可以改寫成不含空白的 `-o User=alice`。

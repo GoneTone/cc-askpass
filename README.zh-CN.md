@@ -119,7 +119,7 @@ Defaults:你的用户名 timestamp_type=global, timestamp_timeout=5
 - 非交互模式（`claude -p`、SDK）下没有人能回答，cc-askpass 不会启动，sudo 会和没装时一样直接失败。
 - 开启 Bash 沙箱时，sudo 无法在沙箱内运行，会立即失败（Linux 上显示“The "no new privileges" flag is set, which prevents sudo from running as root”，macOS 上显示“operation not permitted: sudo”）。如果你允许 Claude 在沙箱外运行该命令，面板就会照常询问。
 - ssh 的确认提示（`SSH_ASKPASS_PROMPT=confirm`）会以普通文本输入的形式出现。
-- Windows：自己会弹出密码窗口的程序（Git Credential Manager、Pageant）照旧用自己的窗口。
+- Windows：自己会弹出密码窗口的程序（Git Credential Manager、Pageant）照旧用自己的窗口。关掉 Git Credential Manager 的窗口后，git 会改在面板里询问。
 - 在远程主机上以完整路径调用 sudo（例如 `/usr/bin/sudo`）时不会使用面板：没有终端时会直接失败，在 `ssh -t` 下则会读取终端。请直接写 `sudo`。
 - 如果远程主机的 shell 启动文件（例如 `.bashrc`、`.zshenv`）在执行命令时会打印文字，比如欢迎信息，cc-askpass 就无法确认这台主机是否适用。命令仍会照常执行，但那台主机上的 sudo 不会出现在面板。解决方法是让那段文字只在交互式 shell 中打印，或改为输出到 stderr。
 - ssh 命令中，主机名之前的选项或主机名本身如果含有空格，例如 `-o "User alice"` 或 `-i "/keys/my key"`，cc-askpass 就不会处理这条 ssh 命令，远程主机上的 sudo 也就不会出现在面板。`-o` 选项可以改写成不含空格的 `-o User=alice`。

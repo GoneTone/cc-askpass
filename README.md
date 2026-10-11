@@ -119,7 +119,7 @@ Turn it on only if you accept that. Keep the timeout short, and run `sudo -k` wh
 - In non-interactive runs (`claude -p`, the SDK) cc-askpass does nothing, since nobody is there to answer; sudo fails as it would without it.
 - With the Bash sandbox on, sudo cannot run inside it and fails at once (on Linux with `The "no new privileges" flag is set, which prevents sudo from running as root`, on macOS with `operation not permitted: sudo`). If you let Claude run the command outside the sandbox, the pane asks as usual.
 - ssh confirmation prompts (`SSH_ASKPASS_PROMPT=confirm`) appear as an ordinary text prompt.
-- Windows: programs that show their own password window (Git Credential Manager, Pageant) keep doing so.
+- Windows: programs that show their own password window (Git Credential Manager, Pageant) keep doing so. If you close Git Credential Manager's window, git asks in the pane instead.
 - On a remote host, sudo called by its full path (such as `/usr/bin/sudo`) does not use the pane: it fails for lack of a terminal, or reads the terminal under `ssh -t`. Call it as plain `sudo`.
 - If a shell startup file on the remote host (such as `.bashrc` or `.zshenv`) prints text when a command runs, a welcome message for example, cc-askpass cannot confirm that the host supports it. The command still runs, but sudo there does not reach the pane. To fix it, print that text only in interactive shells, or send it to stderr.
 - If an ssh option before the host name, or the host name itself, contains a space, such as `-o "User alice"` or `-i "/keys/my key"`, cc-askpass leaves that ssh command alone, so sudo on the remote host does not reach the pane. For `-o`, drop the space: `-o User=alice`.
