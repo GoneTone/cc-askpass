@@ -47,7 +47,11 @@ jobs:
             exit 1
           fi
           echo "PIN=1" >> "$GITHUB_ENV"
+          echo "SHA=$(git rev-parse "$TAG^{commit}")" >> "$GITHUB_ENV"
 
+      # An https URL, not the `github` shorthand: for the shorthand Claude Code probes the user's
+      # SSH key and clones over SSH when it thinks one works, which fails for people whose key is
+      # not registered with GitHub. The sha keeps the install on this commit even if the tag moves.
       - name: Pin the marketplace to the tag
         if: env.PIN == '1'
         run: |
@@ -56,7 +60,12 @@ jobs:
           path = '.claude-plugin/marketplace.json'
           with open(path) as f:
               marketplace = json.load(f)
-          marketplace['plugins'][0]['source'] = {'source': 'github', 'repo': os.environ['REPO'], 'ref': os.environ['TAG']}
+          marketplace['plugins'][0]['source'] = {
+              'source': 'url',
+              'url': f"https://github.com/{os.environ['REPO']}.git",
+              'ref': os.environ['TAG'],
+              'sha': os.environ['SHA'],
+          }
           with open(path, 'w') as f:
               json.dump(marketplace, f, indent=2)
               f.write('\n')
