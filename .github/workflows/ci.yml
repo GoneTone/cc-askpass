@@ -24,6 +24,11 @@ jobs:
       - run: claude --version
       - run: claude plugin validate .
       - run: claude plugin test .
+      # Preinstalled on the Ubuntu runner. Left out, as the scripts mean them: `a= b=` on one line
+      # (SC1007), getopts letters passed on unhandled (SC2213), `test -O`, which every sh in use
+      # has (SC3067), variables read only to be skipped (SC2034) and `"$@"` after `eval set --` (SC2120).
+      - if: runner.os == 'Linux'
+        run: shellcheck -s sh -S warning -e SC1007,SC2213,SC3067,SC2034,SC2120 bin/askpass bin/exe-of bin/msys-parents bin/remote.sh bin/shim/ssh
       - if: runner.os != 'Windows'
         run: sh tests/askpass.sh
       - if: runner.os == 'Windows'
