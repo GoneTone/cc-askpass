@@ -2,7 +2,7 @@
   "name": "cc-askpass",
   "version": "0.1.0",
   "description": "Lets Claude run commands that ask for a password (sudo, ssh, git): a pane inside Claude Code asks you, and the password never reaches the model",
-  "author": { "name": "GoneTone" },
+  "author": { "name": "GoneTone", "url": "https://github.com/GoneTone" },
   "homepage": "https://github.com/GoneTone/cc-askpass",
   "repository": "https://github.com/GoneTone/cc-askpass",
   "license": "MIT",
