@@ -14,6 +14,7 @@
     "ssh",
     "git",
     "password",
+    "passphrase",
     "askpass"
   ],
   "userConfig": {

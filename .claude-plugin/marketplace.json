@@ -23,7 +23,9 @@
         "sudo",
         "ssh",
         "git",
-        "password"
+        "password",
+        "passphrase",
+        "askpass"
       ]
     }
   ]
