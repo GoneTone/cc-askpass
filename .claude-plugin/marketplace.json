@@ -13,7 +13,7 @@
         "source": "url",
         "url": "https://github.com/GoneTone/cc-askpass.git",
         "ref": "v0.1.0",
-        "sha": "22a1d532218120659350f731cacc0e64150b7b35"
+        "sha": "748d3bd0a94bb0c47e349ac7639402f4bf1a4cfe"
       },
       "description": "Lets Claude run commands that ask for a password (sudo, ssh, git): a pane inside Claude Code asks you, and the password never reaches the model",
       "author": {
