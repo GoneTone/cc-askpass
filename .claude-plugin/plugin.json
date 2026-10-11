@@ -1,9 +1,12 @@
 {
   "name": "cc-askpass",
   "version": "0.1.0",
-  "description": "Answer sudo/ssh askpass prompts from Claude's Bash commands with an in-app password pane",
+  "description": "Lets Claude run commands that ask for a password (sudo, ssh, git): a pane inside Claude Code asks you, and the password never reaches the model",
   "author": { "name": "GoneTone" },
+  "homepage": "https://github.com/GoneTone/cc-askpass",
+  "repository": "https://github.com/GoneTone/cc-askpass",
   "license": "MIT",
+  "keywords": ["sudo", "ssh", "git", "password", "askpass"],
   "userConfig": {
     "remoteHosts": {
       "type": "boolean",
