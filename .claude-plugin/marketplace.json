@@ -9,7 +9,11 @@
   "plugins": [
     {
       "name": "cc-askpass",
-      "source": "./",
+      "source": {
+        "source": "github",
+        "repo": "GoneTone/cc-askpass",
+        "ref": "v0.1.0"
+      },
       "description": "Lets Claude run commands that ask for a password (sudo, ssh, git): a pane inside Claude Code asks you, and the password never reaches the model",
       "author": {
         "name": "GoneTone",
