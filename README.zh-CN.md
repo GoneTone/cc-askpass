@@ -117,7 +117,7 @@ Defaults:你的用户名 timestamp_type=global, timestamp_timeout=5
 - 在没有图形界面的主机上，cc-askpass 设置的占位值 `DISPLAY=:0` 可能让少数图形程序（例如 `xdg-open`）失败。
 - 移动版 app（以及从手机使用 Remote Control）无法显示输入框，请改在终端或桌面版 app 回答。
 - 非交互模式（`claude -p`、SDK）下没有人能回答，cc-askpass 不会启动，sudo 会和没装时一样直接失败。
-- 开启 Bash 沙箱时，sudo 会立即失败，并显示“the cc-askpass listener is not running”。
+- 开启 Bash 沙箱时，sudo 无法在沙箱内运行，会立即失败（Linux 上显示“The "no new privileges" flag is set, which prevents sudo from running as root”，macOS 上显示“operation not permitted: sudo”）。如果你允许 Claude 在沙箱外运行该命令，面板就会照常询问。
 - ssh 的确认提示（`SSH_ASKPASS_PROMPT=confirm`）会以普通文本输入的形式出现。
 - Windows：自己会弹出密码窗口的程序（Git Credential Manager、Pageant）照旧用自己的窗口。
 - 在远程主机上以完整路径调用 sudo（例如 `/usr/bin/sudo`）时不会使用面板：没有终端时会直接失败，在 `ssh -t` 下则会读取终端。请直接写 `sudo`。

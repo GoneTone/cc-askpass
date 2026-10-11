@@ -117,7 +117,7 @@ Turn it on only if you accept that. Keep the timeout short, and run `sudo -k` wh
 - On hosts without a display, the placeholder `DISPLAY=:0` that cc-askpass sets may make a few graphical programs (such as `xdg-open`) fail.
 - The mobile app (and Remote Control from a phone) cannot show an input field; answer from the terminal or the desktop app.
 - In non-interactive runs (`claude -p`, the SDK) cc-askpass does nothing, since nobody is there to answer; sudo fails as it would without it.
-- With the Bash sandbox on, sudo fails at once with "the cc-askpass listener is not running".
+- With the Bash sandbox on, sudo cannot run inside it and fails at once (on Linux with `The "no new privileges" flag is set, which prevents sudo from running as root`, on macOS with `operation not permitted: sudo`). If you let Claude run the command outside the sandbox, the pane asks as usual.
 - ssh confirmation prompts (`SSH_ASKPASS_PROMPT=confirm`) appear as an ordinary text prompt.
 - Windows: programs that show their own password window (Git Credential Manager, Pageant) keep doing so.
 - On a remote host, sudo called by its full path (such as `/usr/bin/sudo`) does not use the pane: it fails for lack of a terminal, or reads the terminal under `ssh -t`. Call it as plain `sudo`.
