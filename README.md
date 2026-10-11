@@ -111,10 +111,10 @@ Turn it on only if you accept that. Keep the timeout short, and run `sudo -k` wh
 <summary><b>Limitations</b></summary>
 
 - `su` and `doas` cannot use askpass. Use sudo.
-- polkit (`pkexec`, `run0`, `systemctl` as a normal user) fails with "Interactive authentication required" instead of asking.
+- polkit (`pkexec`, `run0`, `systemctl` as a normal user) fails instead of asking: `systemctl` with "Interactive authentication required", `pkexec` with "Error creating textual authentication agent".
 - Yes/no questions that a program asks by itself (such as apt's `Do you want to continue? [Y/n]`) are not handled. Use flags such as `-y` or `--no-interaction`.
 - In hidden input, deleting a character in the middle removes the last character instead. If you edit in the middle, press Show to check, or clear the field and type again.
-- On hosts without a display, the placeholder `DISPLAY=:0` that cc-askpass sets may make a few graphical programs (such as `xdg-open`) fail.
+- On hosts without a display, the placeholder `DISPLAY=:0` that cc-askpass sets may make a graphical program try to reach an X server that is not there, and fail.
 - The mobile app (and Remote Control from a phone) cannot show an input field; answer from the terminal or the desktop app.
 - In non-interactive runs (`claude -p`, the SDK) cc-askpass does nothing, since nobody is there to answer; sudo fails as it would without it.
 - With the Bash sandbox on, sudo cannot run inside it and fails at once (on Linux with `The "no new privileges" flag is set, which prevents sudo from running as root`, on macOS with `operation not permitted: sudo`). If you let Claude run the command outside the sandbox, the pane asks as usual.

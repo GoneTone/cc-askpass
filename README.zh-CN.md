@@ -111,10 +111,10 @@ Defaults:你的用户名 timestamp_type=global, timestamp_timeout=5
 <summary><b>限制</b></summary>
 
 - `su` 和 `doas` 不支持 askpass，请改用 sudo。
-- polkit（`pkexec`、`run0`、以普通用户执行 `systemctl`）会直接显示“Interactive authentication required”而不会询问。
+- polkit（`pkexec`、`run0`、以普通用户执行 `systemctl`）会直接失败而不会询问：`systemctl` 显示“Interactive authentication required”，`pkexec` 显示“Error creating textual authentication agent”。
 - 程序自己询问的 y/n 问题（例如 apt 的 `Do you want to continue? [Y/n]`）不会处理，请使用 `-y`、`--no-interaction` 等参数。
 - 输入内容被遮住时，在中间删除一个字符，实际被删掉的会是最后一个字符。如果在中间编辑过，请按 Show 确认，或清空后重新输入。
-- 在没有图形界面的主机上，cc-askpass 设置的占位值 `DISPLAY=:0` 可能让少数图形程序（例如 `xdg-open`）失败。
+- 在没有图形界面的主机上，cc-askpass 设置的占位值 `DISPLAY=:0` 可能让图形程序去连接不存在的 X server 而失败。
 - 移动版 app（以及从手机使用 Remote Control）无法显示输入框，请改在终端或桌面版 app 回答。
 - 非交互模式（`claude -p`、SDK）下没有人能回答，cc-askpass 不会启动，sudo 会和没装时一样直接失败。
 - 开启 Bash 沙箱时，sudo 无法在沙箱内运行，会立即失败（Linux 上显示“The "no new privileges" flag is set, which prevents sudo from running as root”，macOS 上显示“operation not permitted: sudo”）。如果你允许 Claude 在沙箱外运行该命令，面板就会照常询问。
