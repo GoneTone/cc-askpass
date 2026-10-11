@@ -6,6 +6,8 @@ English | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md)
 
 When a command Claude runs asks for a password (`sudo apt install`, an install script that calls sudo, `git push` over HTTPS, an ssh key passphrase), cc-askpass opens a password pane inside Claude Code where you can type it. The password goes straight to the program that asked. It never reaches the model, the transcript or any log.
 
+https://github.com/user-attachments/assets/c4d503cc-fdc1-4c43-bdb8-50946cd28e2f
+
 Without it, Claude's Bash tool has no terminal, so sudo fails at once:
 
 ```

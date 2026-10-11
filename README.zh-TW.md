@@ -6,6 +6,8 @@
 
 Claude 執行的指令需要密碼時（`sudo apt install`、會呼叫 sudo 的安裝腳本、透過 HTTPS 的 `git push`、ssh 金鑰的 passphrase），cc-askpass 會在 Claude Code 裡跳出密碼面板讓你可以輸入密碼。密碼會直接交給提出要求的程式，不會進入模型、對話紀錄或任何 log。
 
+https://github.com/user-attachments/assets/c4d503cc-fdc1-4c43-bdb8-50946cd28e2f
+
 沒有它的話，Claude 的 Bash 工具沒有終端機，sudo 會直接失敗：
 
 ```
