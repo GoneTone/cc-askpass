@@ -787,7 +787,7 @@ try {
   }
 
   # Optional: CC_ASKPASS_TEST_SSH names a reachable host with key login, e.g.
-  # 'gonetone@127.0.0.1 -p 2299 -i C:\key -o StrictHostKeyChecking=no'.
+  # 'user@host -p 2299 -i C:\key -o StrictHostKeyChecking=no'.
   if ($env:CC_ASKPASS_TEST_SSH) {
     Test 'end to end through a real sshd' {
       $target = $env:CC_ASKPASS_TEST_SSH -split ' '
