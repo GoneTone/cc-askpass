@@ -1,18 +1,30 @@
 {
   "name": "cc-askpass",
-  "owner": { "name": "GoneTone" },
-  "metadata": { "description": "In-app password prompts for sudo, ssh and git run by Claude Code" },
+  "owner": {
+    "name": "GoneTone"
+  },
+  "metadata": {
+    "description": "In-app password prompts for sudo, ssh and git run by Claude Code"
+  },
   "plugins": [
     {
       "name": "cc-askpass",
       "source": "./",
       "description": "Lets Claude run commands that ask for a password (sudo, ssh, git): a pane inside Claude Code asks you, and the password never reaches the model",
-      "author": { "name": "GoneTone", "url": "https://github.com/GoneTone" },
+      "author": {
+        "name": "GoneTone",
+        "url": "https://github.com/GoneTone"
+      },
       "homepage": "https://github.com/GoneTone/cc-askpass",
       "repository": "https://github.com/GoneTone/cc-askpass",
       "license": "MIT",
       "category": "security",
-      "tags": ["sudo", "ssh", "git", "password"]
+      "tags": [
+        "sudo",
+        "ssh",
+        "git",
+        "password"
+      ]
     }
   ]
 }
