@@ -1,7 +1,9 @@
 name: CI
 
 on:
+  # Branches run once, through their pull request; master runs on every push.
   push:
+    branches: [master]
   pull_request:
   # release.yml runs the whole CI through workflow_call as the gate before a release.
   workflow_call:
