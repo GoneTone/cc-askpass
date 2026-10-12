@@ -120,6 +120,8 @@ let current: Request | null = null
 let isAdvancing = false
 let typed = ''
 let isMasked = true
+// True once the person asks to see the clipped command lines whole.
+let isExpanded = false
 // True while the current request waits for the person to open its pane (narrow terminal).
 let isWaitingForOpen = false
 let aliveTimer: Timer | null = null
@@ -373,23 +375,31 @@ function isUnverified(requester: Requester): boolean {
   return requester.askedBy.kind === 'unverified'
 }
 
-function claudeLine(request: Request): string | null {
+function claudeLine(request: Request, width = PANE_WIDTH, maxRows = MAX_SECTION_ROWS): string | null {
   // A remote pane always has the line: what Claude Code recorded is the one thing no process
   // can change, and "(unknown)" says nothing vouches for the request.
   const command = request.claudeCommand ?? (request.requester.remote === undefined ? null : '(unknown)')
   if (command === null) return null
-  return clipLines(`Claude ran: ${command}`, MAX_SECTION_ROWS, PANE_WIDTH)
+  return clipLines(`Claude ran: ${command}`, maxRows, width)
 }
 
-function commandLine(request: Request): string {
+function commandLine(request: Request, width = PANE_WIDTH, maxRows = MAX_SECTION_ROWS): string {
   const { remote } = request.requester
-  if (remote === undefined) return clipLines(`$ ${request.requester.command}`, MAX_SECTION_ROWS, PANE_WIDTH)
+  if (remote === undefined) return clipLines(`$ ${request.requester.command}`, maxRows, width)
   if (remote.reported === null) return `$ (not reported by ${remote.host})`
   // Only the reported text is cut: who reported it must stay in view.
   const suffix = ` (reported by ${remote.host})`
-  const room = MAX_SECTION_ROWS * PANE_WIDTH - suffix.length
+  const room = Math.max(1, maxRows * width - suffix.length)
   const line = `$ ${remote.reported}`
   return `${line.length > room ? `${line.slice(0, room - 1)}…` : line}${suffix}`
+}
+
+/** True when the Claude or `$` line is cut, so the pane offers them whole. */
+function isClipped(request: Request, width = PANE_WIDTH): boolean {
+  return (
+    claudeLine(request, width) !== claudeLine(request, width, Infinity) ||
+    commandLine(request, width) !== commandLine(request, width, Infinity)
+  )
 }
 
 /**
@@ -406,7 +416,8 @@ function paneRows(request: Request): number {
     (isUnverified(request.requester) ? wrappedLines(UNVERIFIED_WARNING, PANE_WIDTH) : 0) +
     remote +
     (claude === null ? 0 : wrappedLines(claude, PANE_WIDTH)) +
-    wrappedLines(commandLine(request), PANE_WIDTH)
+    wrappedLines(commandLine(request), PANE_WIDTH) +
+    (isClipped(request) ? 1 : 0)
   const field = (request.isRetry ? 1 : 0) + wrappedLines(promptLabel(request.prompt), PANE_WIDTH) + 1
   const blankLines = 3
   return wrappedLines(focusWarning(false), PANE_WIDTH) + header + field + 1 + blankLines
@@ -468,6 +479,7 @@ async function showNext($: EngineInterface): Promise<void> {
       current = request
       typed = ''
       isMasked = isMaskedByDefault(request)
+      isExpanded = false
       // A pane still open from before a reload is not drawn again by `ui.open`.
       $.ui.invalidate('ui.render')
       aliveTimer = $.clock.every(ALIVE_POLL_MS, () => {
@@ -872,7 +884,11 @@ export const register: Register = (on, options) => {
     // A fresh key per request and per load: an Input keeps its old text when a key is reused.
     const key = `password-${request.id}-${LOAD_ID}`
     const warning = e.props.isFocused ? null : focusWarning(isMainScreen(e))
-    const claude = claudeLine(request)
+    // Clipped at the body's own width, less the paddingX on each side. Expanded, the pane
+    // keeps its size and its body scrolls.
+    const width = Math.max(1, e.props.bodyColumns - 2)
+    const maxRows = isExpanded ? Infinity : MAX_SECTION_ROWS
+    const claude = claudeLine(request, width, maxRows)
     const isRemote = request.requester.remote !== undefined
 
     return (
@@ -906,8 +922,21 @@ export const register: Register = (on, options) => {
           </Text>
         )}
         <Text dimColor wrap="wrap">
-          {commandLine(request)}
+          {commandLine(request, width, maxRows)}
         </Text>
+        {isClipped(request, width) && (
+          <Box>
+            <Button
+              key="expand"
+              onPress={() => {
+                isExpanded = !isExpanded
+                $.ui.invalidate('ui.render')
+              }}
+            >
+              {isExpanded ? 'Show less' : 'Show full command'}
+            </Button>
+          </Box>
+        )}
         <Text> </Text>
         {request.isRetry && <Text color="red">Sorry, try again.</Text>}
         <Text wrap="wrap">{promptLabel(request.prompt)}</Text>

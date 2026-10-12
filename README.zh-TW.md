@@ -36,6 +36,7 @@ sudo: a password is required
 
 Claude 執行的指令要求密碼時，就會跳出面板。`$` 那行顯示提出要求的指令；如果是 sudo，就是將以 root 執行的指令（例如 `$ sudo apt update`）。`Asked by:` 標出提出要求的程式；如果提示是由 Claude 執行的其他東西間接觸發的（例如 `./install.sh`），`Claude ran:` 會顯示那個指令。確認這些都符合預期再回答：輸入密碼後按 Enter。
 
+- `Claude ran:` 或 `$` 那行太長被截斷時會出現 **Show full command**，按下後兩行都會完整顯示；按 **Show less** 再收回。
 - **Show/Hide** 切換是否顯示你輸入的內容。
 - 按 **Cancel** 或 Esc 就是不回答，sudo 會直接結束。
 - 密碼打錯時，sudo 會再問一次。

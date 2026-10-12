@@ -332,8 +332,87 @@ test('asks for the rows its content needs', async ($, on) => {
   const w = await world($, on)
   await w.bashCall('sudo -k && ./install.sh', 4100)
   await w.request(4242, 4100, SUDO_PROMPT, `root sudo sudo cp ${'x'.repeat(400)} /opt`)
-  // 10 for a plain request, plus the Claude line (1) and two more rows of the clipped `$` line.
-  expect(w.rec.opens.at(-1)?.rows).toBe(14)
+  // 10 for a plain request, plus the Claude line (1), two more rows of the clipped `$` line
+  // and the row of its Show full command button.
+  expect(w.rec.opens.at(-1)?.rows).toBe(15)
+})
+
+test('a clipped command can be shown whole and clipped again', async ($, on) => {
+  const w = await world($, on)
+  const claudeRan = `sudo -k && ./install.sh ${'y'.repeat(400)}`
+  await w.bashCall(claudeRan, 4100)
+  await w.request(4242, 4100, SUDO_PROMPT, `root sudo sudo cp ${'x'.repeat(400)} /opt`)
+  const ui = await w.mount('terminal')
+  expect((await ui.find({ key: 'expand' }))?.text).toBe('Show full command')
+  await ui.press({ key: 'expand' })
+  expect((await ui.find({ type: 'Text', text: /^Claude ran:/ }))?.text).toBe(`Claude ran: ${claudeRan}`)
+  expect((await ui.find({ type: 'Text', text: /^\$ sudo cp/ }))?.text).toBe(`$ sudo cp ${'x'.repeat(400)} /opt`)
+  expect((await ui.find({ key: 'expand' }))?.text).toBe('Show less')
+  await ui.press({ key: 'expand' })
+  expect((await ui.find({ type: 'Text', text: /^\$ sudo cp/ }))?.text.endsWith('…')).toBe(true)
+})
+
+test('a clipped Claude line alone offers the button', async ($, on) => {
+  const w = await world($, on)
+  const claudeRan = `sudo -k && ./install.sh ${'y'.repeat(400)}`
+  await w.bashCall(claudeRan, 4100)
+  await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+  const ui = await w.mount('terminal')
+  await ui.press({ key: 'expand' })
+  expect((await ui.find({ type: 'Text', text: /^Claude ran:/ }))?.text).toBe(`Claude ran: ${claudeRan}`)
+  expect((await ui.find({ type: 'Text', text: /^\$ / }))?.text).toBe('$ sudo apt update')
+})
+
+for (const [bodyColumns, length] of [[60, 174], [120, 354]] as const) {
+  test(`clips to three rows of the body's width (${bodyColumns} columns)`, async ($, on) => {
+    const w = await world($, on)
+    await w.request(4242, 4100, SUDO_PROMPT, `root sudo sudo cp ${'x'.repeat(400)} /opt`)
+    const ui = await $.ui.mount({
+      plugin: 'cc-askpass',
+      surface: 'terminal',
+      component: 'Pane',
+      props: { ...PANE_PROPS, bodyColumns },
+      requestId: 'askpass',
+    })
+    // Three rows of the body less its padding on each side.
+    expect((await ui.find({ type: 'Text', text: /^\$ sudo cp/ }))?.text.length).toBe(length)
+  })
+}
+
+test('a command that fits a wide body has no Show full command button', async ($, on) => {
+  const w = await world($, on)
+  await w.request(4242, 4100, SUDO_PROMPT, `root sudo sudo cp ${'x'.repeat(200)} /opt`)
+  const ui = await $.ui.mount({
+    plugin: 'cc-askpass',
+    surface: 'terminal',
+    component: 'Pane',
+    props: { ...PANE_PROPS, bodyColumns: 120 },
+    requestId: 'askpass',
+  })
+  expect((await ui.find({ type: 'Text', text: /^\$ sudo cp/ }))?.text.endsWith('/opt')).toBe(true)
+  expect(await ui.find({ key: 'expand' })).toBeUndefined()
+})
+
+test('a command that fits has no Show full command button', async ($, on) => {
+  const w = await world($, on)
+  await w.request(4242, 4100, SUDO_PROMPT, SUDO_PARENT)
+  const ui = await w.mount('terminal')
+  expect(await ui.find({ key: 'expand' })).toBeUndefined()
+})
+
+test('a new request starts clipped again', async ($, on) => {
+  const w = await world($, on)
+  const parent = `root sudo sudo cp ${'x'.repeat(400)} /opt`
+  await w.request(4242, 4100, SUDO_PROMPT, parent)
+  let ui = await w.mount('terminal')
+  await ui.press({ key: 'expand' })
+  await ui.press({ key: 'cancel' })
+  await w.clock.settle()
+  await ui.unmount()
+  await w.request(4243, 4100, SUDO_PROMPT, parent)
+  ui = await w.mount('terminal')
+  expect((await ui.find({ key: 'expand' }))?.text).toBe('Show full command')
+  expect((await ui.find({ type: 'Text', text: /^\$ sudo cp/ }))?.text.endsWith('…')).toBe(true)
 })
 
 test('asks ps for whole command lines', async ($, on) => {
@@ -632,6 +711,16 @@ test('accepts a request relayed by the ssh wrapper', async ($, on) => {
   expect((await ui.find({ key: await passwordKey(ui) })) !== undefined).toBe(true)
   await typeMasked(ui, await passwordKey(ui), 'ab')
   expect((await ui.find({ key: await passwordKey(ui) }))?.props.value).toBe('••')
+})
+
+test('a remote command shown whole still names its host', async ($, on) => {
+  const w = await world($, on)
+  const reported = `sudo cp ${'x'.repeat(400)} /opt`
+  await w.relayRequest(4242, { prompt: BOB_PROMPT, via: 'server', reported })
+  const ui = await w.mount('terminal')
+  expect((await ui.find({ type: 'Text', text: /^\$ / }))?.text).toMatch(/… \(reported by server\)$/)
+  await ui.press({ key: 'expand' })
+  expect((await ui.find({ type: 'Text', text: /^\$ / }))?.text).toBe(`$ ${reported} (reported by server)`)
 })
 
 test('labels a second hop', async ($, on) => {

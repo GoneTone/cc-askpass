@@ -36,6 +36,7 @@ Needs Claude Code 2.1.286 or later, on Linux, WSL, macOS or Windows. Run these i
 
 When a command Claude runs asks for a password, the pane opens. Its `$` line shows the command that asked; for sudo, that is the command that will run as root (for example `$ sudo apt update`). `Asked by:` names the program that asked. If the prompt came from something else Claude ran (such as `./install.sh`), `Claude ran:` shows that command. Answer only if these are what you expect: type the password and press Enter.
 
+- **Show full command** appears when a long `Claude ran:` or `$` line is cut short, and shows both lines in full; **Show less** cuts them again.
 - **Show/Hide** shows or hides what you typed.
 - **Cancel** or Esc sends no answer, so sudo stops.
 - If the password is wrong, sudo asks again.
